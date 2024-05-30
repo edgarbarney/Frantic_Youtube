@@ -20,7 +20,7 @@ Client updates videos every 10th of a second.
 ## Installation
 Try one of the working methods below
 ### Older QBCore
-1. Download the Latest Release.
+1. Download the [Latest Release](https://github.com/edgarbarney/Frantic_Youtube/releases).
 2. Extract content into somewhere convenient in the resources folder.
 3. (Optional) Put `ensure Frantic_Youtube` into the server.cfg.
 4. Navigate to your qb-core's player.lua script. Generally, it's location is    
@@ -39,7 +39,7 @@ PlayerData.metadata['FranticYoutube'] = PlayerData.metadata['FranticYoutube'] or
 8. Finally, run the SQL file for your database.
 
 ### Newer QBCore
-1. Download the Latest Release.
+1. Download the [Latest Release](https://github.com/edgarbarney/Frantic_Youtube/releases).
 2. Extract content into somewhere convenient in the resources folder.
 3. (Optional) Put `ensure Frantic_Youtube` into the server.cfg.
 4. Navigate to your qb-core's config.lua file. Generally, it's location is   
