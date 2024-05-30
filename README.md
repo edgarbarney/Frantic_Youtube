@@ -23,8 +23,10 @@ Try one of the working methods below
 1. Download the Latest Release.
 2. Extract content into somewhere convenient in the resources folder.
 3. (Optional) Put `ensure Frantic_Youtube` into the server.cfg.
-4. Navigate to your qb-core's player.lua script. Generally, it's location is `resources\[qb]\qb-core\server\player.lua`.
-5. Find the `QBCore.Player.CheckPlayerData` function, located around 100th line, you can search for `function QBCore.Player.CheckPlayerData(source, PlayerData)`.
+4. Navigate to your qb-core's player.lua script. Generally, it's location is    
+`resources\[qb]\qb-core\server\player.lua`.
+5. Find the `QBCore.Player.CheckPlayerData` function, located around 100th line, you can search for   
+`function QBCore.Player.CheckPlayerData(source, PlayerData)`.
 6. Find the `--Metadata` part.  
 If you can't find it and there's `metadata = {` instead, try continuing with the Newer QBCore installation.
 7. Then add thid code in an appropriate place, preferably right before the `-- Job` part:
@@ -40,7 +42,8 @@ PlayerData.metadata['FranticYoutube'] = PlayerData.metadata['FranticYoutube'] or
 1. Download the Latest Release.
 2. Extract content into somewhere convenient in the resources folder.
 3. (Optional) Put `ensure Frantic_Youtube` into the server.cfg.
-4. Navigate to your qb-core's config.lua file. Generally, it's location is `resources\[qb]\qb-core\config.lua`.
+4. Navigate to your qb-core's config.lua file. Generally, it's location is   
+`resources\[qb]\qb-core\config.lua`.
 5. Find the `QBConfig.Player.PlayerDefaults` table, .located around 20th line.
 6. Find the `metadata = {` part.
 7. Then add thid code in an appropriate place, preferably right after the `phonedata = {}` part:
