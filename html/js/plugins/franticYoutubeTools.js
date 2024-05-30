@@ -2,6 +2,7 @@ YoutubeTools = {};
 
 YoutubeTools.GetVideoDuration = function(videoId) {
     // TODO: Implement the function to get the video duration
+    // For now, we're using the youtube player in the main.js
     return 1200; // 20 minutes
 }
 
