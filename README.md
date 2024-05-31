@@ -192,16 +192,16 @@ FranticYoutube = {
 	```lua
 	sourceTable = { -- Table of sources with player IDs
 		"25_1" = { -- An example source with player ID of 25
-			source = 25,			-- Owner Client ID
-            index = 1,				-- For now, we just use 1
-            videoUrl = data.url,	-- Youtube ID of CUrrent Video
-            videoStartTime = 124,	-- Start Time (in Server Sync Time) 
-            videoCurrentTime = 152,	-- Current Video Time
-            videoDuration = 220,	-- Current Video Total Duration
-            videoState = 1,			-- Current Video State
-            videoVolume = 1,		-- Current Video Volume
-            videoLoaded = false,	-- Is Video Finished Buffering?
-            videoSpeakerVolume = 1,	-- Speaker Volume of the Owner Client
+	            source = 25,		-- Owner Client ID
+	            index = 1,			-- For now, we just use 1
+	            videoUrl = data.url,	-- Youtube ID of CUrrent Video
+	            videoStartTime = 124,	-- Start Time (in Server Sync Time) 
+	            videoCurrentTime = 152,	-- Current Video Time
+	            videoDuration = 220,	-- Current Video Total Duration
+	            videoState = 1,		-- Current Video State
+	            videoVolume = 1,		-- Current Video Volume
+	            videoLoaded = false,	-- Is Video Finished Buffering?
+	            videoSpeakerVolume = 1,	-- Speaker Volume of the Owner Client
 		}
 	}, 
 	vidServerTime = 100 -- Server sync time
