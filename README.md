@@ -11,7 +11,7 @@ Credit to <b>FranticDreamer</b> is not required, but hugely appreciated.
 Feel free to create issues and pull requests.
 
 ## General Information
-Videos are networked, and listenable by everyone in a certain radius.  
+Videos are networked, attached to players and listenable by everyone in a certain radius.  
 Radius is in the config.lua  
   
 Default settings:  
