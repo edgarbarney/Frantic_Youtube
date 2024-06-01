@@ -146,13 +146,12 @@ local sourcePlayerCoords = vector3(0,0,0)
 local sourcePlayerDistance = 0
 local sendCurrentData = false
 local lastSourceTable = nil
-local clientRefreshRate <const> = 100 -- 100ms
 
 -- This is omittable.
 -- Mainly for smoothness of the attenuation of the sound.
 CreateThread(function()
     while true do
-        Wait(clientRefreshRate)
+        Wait(Config.clientRefreshRate)
         RefreshPlayers()
     end
 end)

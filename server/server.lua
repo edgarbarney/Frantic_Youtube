@@ -85,7 +85,6 @@ function getTablelength(T)
     return count
 end
 
-local refreshRate <const> = 1000 -- 1 second
 local globalVideoTimer = 0 -- Serverside timer to keep track of the video time in seconds
 
 local lastVideoData = {} -- Array to store the last video data for a citizen
@@ -95,14 +94,14 @@ local vidSourceTable = {}
 
 CreateThread(function()
     while true do
-        globalVideoTimer = globalVideoTimer + (refreshRate/1000)
-        Wait(refreshRate)
+        globalVideoTimer = globalVideoTimer + (Config.serverRefreshRate/1000)
+        Wait(Config.serverRefreshRate)
         
         for k, v in pairs(vidSourceTable) do
             if vidSourceTable[k] then
                 if vidSourceTable[k].videoUrl ~= "" then
                     if vidSourceTable[k].videoState == 1 then -- Playings
-                        vidSourceTable[k].videoCurrentTime = vidSourceTable[k].videoCurrentTime + (refreshRate/1000)
+                        vidSourceTable[k].videoCurrentTime = vidSourceTable[k].videoCurrentTime + (Config.serverRefreshRate/1000)
                     end
 
                     if vidSourceTable[k].videoDuration > 0 and vidSourceTable[k].videoCurrentTime >= vidSourceTable[k].videoDuration then 
