@@ -4,13 +4,13 @@ This is a library for playing YouTube videos as sounds in the background in Five
 
 Because it doesn't download or stream anything, it complies with YouTube ToS. It's built completely upon YouTube's API.
 
-It's not yet perfect, but hopefully it will be useful for other people.
+It's not yet perfect, but hopefully, it will be useful for people.
 
-This is not a standalone asset; as stated, it's a 'library' for other assets to use.
+This is not a standalone asset; as stated, it's a 'library' for being used by other assets.
 
-Credit to <b>FranticDreamer</b> is not required, but hugely appreciated.
+Credit to <b>FranticDreamer</b> is not required, but hugely appreciated. However, keep the LICENSE.md in your source code folder and don't delete it.
 
-Feel free to create issues and pull requests. If you fix a bug, don't keep it to your server only. Share with people with a pull request, please.
+Feel free to create issues and pull requests. If you fix a bug, don't keep it on your server. Share with people with a pull request, please.
 
 ## General Information
 Videos are networked, attached to players and listenable by everyone in a certain radius.  
