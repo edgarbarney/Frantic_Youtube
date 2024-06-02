@@ -20,6 +20,9 @@ Default settings:
 Server updates clients every second.  
 Client updates videos every 10th of a second.  
 
+## Dependencies
+This library depends on:
+[oxmysql by Overextended](https://github.com/overextended/oxmysql)
 
 ## Installation
 Try one of the working methods below
