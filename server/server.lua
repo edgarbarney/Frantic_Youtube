@@ -102,6 +102,7 @@ CreateThread(function()
                 if vidSourceTable[k].videoUrl ~= "" then
                     if vidSourceTable[k].videoState == 1 then -- Playings
                         vidSourceTable[k].videoCurrentTime = vidSourceTable[k].videoCurrentTime + (Config.serverRefreshRate/1000)
+                        vidSourceTable[k].videoSpeakerPosition = GetEntityCoords(GetPlayerPed(vidSourceTable[k].source))
                     end
 
                     if vidSourceTable[k].videoDuration > 0 and vidSourceTable[k].videoCurrentTime >= vidSourceTable[k].videoDuration then 
@@ -171,6 +172,7 @@ QBCore.Functions.CreateCallback('Frantic_Youtube:server:PlayVideoWithID', functi
                     vidSourceTable[sourceId].videoState = 1
                     vidSourceTable[sourceId].videoLoaded = false
                     vidSourceTable[sourceId].videoSpeakerVolume = Player.PlayerData.metadata['FranticYoutube'].SpeakerVolume
+                    vidSourceTable[sourceId].videoSpeakerPosition = GetEntityCoords(GetPlayerPed(vidSourceTable[sourceId].source))
                     cb(lastVideoData[src])
                     return
                 end
@@ -190,6 +192,7 @@ QBCore.Functions.CreateCallback('Frantic_Youtube:server:PlayVideoWithID', functi
         vidSourceTable[sourceId].videoState = 1
         vidSourceTable[sourceId].videoLoaded = false
         vidSourceTable[sourceId].videoSpeakerVolume = Player.PlayerData.metadata['FranticYoutube'].SpeakerVolume
+        vidSourceTable[sourceId].videoSpeakerPosition = GetEntityCoords(GetPlayerPed(vidSourceTable[sourceId].source))
         cb(lastVideoData[src])
     end)
 end)
@@ -324,6 +327,7 @@ function FranticYoutube_Server_GetDataOnlySourceID(source, data)
             videoVolume = 1, --data.volume,
             videoLoaded = false,
             videoSpeakerVolume = 0,
+            videoSpeakerPosition = vector3(1000,1000,1000)
         }
     end
 
@@ -354,6 +358,7 @@ function FranticYoutube_Server_GetSourceID(source, data)
             videoVolume = 1, --data.volume,
             videoLoaded = false,
             videoSpeakerVolume = 1,
+            videoSpeakerPosition = vector3(1000,1000,1000)
         }
     end
     return vidSourceID

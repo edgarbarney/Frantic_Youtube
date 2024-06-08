@@ -184,6 +184,7 @@ function RefreshPlayers()
         if (videoData.index == 0) then
             -- This source is data only, we don't need to play it
         else
+
             -- Get entity coords from source id (sourceid is the owner player's server id)
             -- We'll get distance between current client and the source player
             sourcePlayer = GetPlayerFromServerId(videoData.source)
@@ -191,11 +192,16 @@ function RefreshPlayers()
             sourcePlayerCoords = GetEntityCoords(sourcePlayerPed)
             sourcePlayerDistance = #(GetEntityCoords(PlayerPedId()) - sourcePlayerCoords)
 
+            -- Source player is ocludded, fallback to server distance
+            if (sourcePlayerDistance == 0.0) then
+                sourcePlayerDistance = #(GetEntityCoords(PlayerPedId()) - videoData.videoSpeakerPosition)
+            end
+
             if (videoData.videoSpeakerVolume == nil) then
                 videoData.videoSpeakerVolume = 1.0
             end
 
-            if (sourcePlayerDistance < 0.2) then
+            if (sourcePlayerDistance < 0.2 or GetPlayerServerId(PlayerId()) == videoData.source) then
                 -- Too close to player, can be player's own source
                 -- Play at full volume
                 
