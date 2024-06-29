@@ -173,7 +173,7 @@ function RefreshPlayers()
     RefreshPlayerMetadata = QBCore.Functions.GetPlayerData().metadata
 
     if (RefreshPlayerMetadata == nil) then
-        RefreshPlayerMetadata = { ListenerVolume = 1.0 }
+        RefreshPlayerMetadata = { ListenerVolume = 0.5 }
     else
         RefreshPlayerMetadata = RefreshPlayerMetadata['FranticYoutube']
     end

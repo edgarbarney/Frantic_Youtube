@@ -39,7 +39,7 @@ If you can't find it and there's `metadata = {` instead, try continuing with the
 7. Then add thid code in an appropriate place, preferably right before the `-- Job` part:
 ```lua
 PlayerData.metadata['FranticYoutube'] = PlayerData.metadata['FranticYoutube'] or {
-	ListenerVolume = 1.0,
+	ListenerVolume = 0.5,
 	SpeakerVolume = 1.0,
 }
 ```
@@ -56,7 +56,7 @@ PlayerData.metadata['FranticYoutube'] = PlayerData.metadata['FranticYoutube'] or
 7. Then add thid code in an appropriate place, preferably right after the `phonedata = {}` part:
 ```lua
 FranticYoutube = {
-	ListenerVolume = 1.0,
+	ListenerVolume = 0.5,
 	SpeakerVolume = 1.0,
 }
 ```
