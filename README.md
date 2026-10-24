@@ -22,6 +22,10 @@ How it stays light:
 - Each client keeps a small pool of YouTube players (`Config.maxActivePlayers`, 3 by default) and gives them to the nearest speakers. Everything else is not loaded at all, so 64 players on the server still means at most 3 YouTube iframes per client, and none when no one is playing music nearby. Unused players are destroyed after `Config.idlePlayerLifetime` seconds.  
 - Video titles and authors come from YouTube's oEmbed endpoint on the server. The duration is reported by the owner's own player once it starts.  
 
+## Debugging
+`Config.debug = true` prints searches, plays, pauses, seeks, volume changes, speaker updates and the YouTube player pool (which player loads what, state changes, YouTube error codes) to the server console and the F8 console.  
+The YouTube page's own log lines are forwarded to F8 too, prefixed with `[page]`.
+
 ## Dependencies
 This library depends on:  
 [oxmysql by Overextended](https://github.com/overextended/oxmysql)
@@ -198,6 +202,18 @@ Old lists stored with a `[0]` first index are converted to plain arrays automati
 	data = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' -- YouTube ID or URL
 	```
 	<b>Returns:</b> Video data (`duration` is 0 if no one has played it yet) or `false`.
+
+10b. <b>Server Callback</b> - Search Videos:  
+	`'Frantic_Youtube:server:SearchVideos'` 
+
+	Keyword search, or a pasted URL/ID. Runs on the server: with `set frantic_youtube_api_key "KEY"` in server.cfg it uses the YouTube Data API v3, otherwise it reads YouTube's results page (no key needed, but it can break when YouTube changes that page). Results are cached for `Config.searchCacheLifetime` seconds.  
+	With `Config.searchMode = 'single'`, keyword search is off: only pasted links/IDs return a result (an empty list otherwise). Use it as a fallback if keyword search breaks.
+
+	<b>Example arguments to Pass:</b>
+	```lua
+	query = 'rick astley'
+	```
+	<b>Returns:</b> Up to `Config.searchResultCount` videos (`url`, `title`, `author`, `duration`), or `false` (empty query, `Config.searchCooldown`, or the search failed; the server console says which).
 
 11. <b>Client Event Handler</b> - Own Video Updated (For your Resource):  
 	`'Frantic_Youtube:client:OwnVideoUpdated'` 

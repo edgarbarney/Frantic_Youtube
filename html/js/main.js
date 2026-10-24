@@ -10,6 +10,7 @@ let settings = {
 	maxActivePlayers: 3,
 	driftTolerance: 3.0,
 	idlePlayerLifetime: 60,
+	debug: false,
 };
 
 let nextSlotId = 0;
@@ -46,6 +47,19 @@ function Post(name, data) {
 		headers: { 'Content-Type': 'application/json; charset=UTF-8' },
 		body: JSON.stringify(data ?? {}),
 	});
+}
+
+// Sent to the client script, which prints it to the F8 console; this page's own console isn't visible in game.
+function Log(message) {
+	if (!settings.debug) {
+		return;
+	}
+	console.log('[Frantic_Youtube] ' + message);
+	Post('Log', { message: message }).catch(() => {});
+}
+
+function DescribeState(state) {
+	return Object.keys(playerState).find((name) => playerState[name] === state) ?? String(state);
 }
 
 function ExpectedPosition(emitter) {
@@ -98,6 +112,7 @@ function CreateSlot() {
 			},
 			events: {
 				onReady: () => {
+					Log(`Player ${slot.id} ready`);
 					slot.isReady = true;
 					resolve();
 				},
@@ -108,10 +123,12 @@ function CreateSlot() {
 	}));
 
 	slots.push(slot);
+	Log(`Creating player ${slot.id} (${slots.length}/${settings.maxActivePlayers} in pool)`);
 	return slot;
 }
 
 function DestroySlot(slot) {
+	Log(`Destroying idle player ${slot.id}`);
 	slot.destroyed = true;
 	const iframe = slot.player.getIframe?.();
 	slot.player.destroy();
@@ -124,16 +141,19 @@ function AssignSlot(emitterId) {
 	let slot = slots.find((candidate) => candidate.emitterId === null && !candidate.destroyed);
 	if (!slot) {
 		if (slots.length >= settings.maxActivePlayers) {
+			Log(`No free player for speaker ${emitterId}; pool is full`);
 			return null;
 		}
 		slot = CreateSlot();
 	}
 
+	Log(`Player ${slot.id} -> speaker ${emitterId}`);
 	slot.emitterId = emitterId;
 	return slot;
 }
 
 function ReleaseSlot(slot) {
+	Log(`Player ${slot.id} released from speaker ${slot.emitterId}`);
 	slot.emitterId = null;
 	slot.releasedAt = performance.now();
 	if (slot.isReady && slot.videoId !== null) {
@@ -188,6 +208,7 @@ function SyncSlot(slot) {
 		slot.lastSeekAt = performance.now();
 
 		const request = { videoId: emitter.videoId, startSeconds: expected };
+		Log(`Player ${slot.id} ${emitter.state === emitterState.playing ? 'loads' : 'cues'} ${emitter.videoId} at ${expected.toFixed(1)}s, volume ${slot.volume}`);
 		if (emitter.state === emitterState.playing) {
 			player.loadVideoById(request);
 		} else {
@@ -219,6 +240,7 @@ function SyncSlot(slot) {
 	// Seeks are rate limited, since a seek during buffering otherwise retriggers itself every tick.
 	const canCheckDrift = state === playerState.playing || state === playerState.paused;
 	if (canCheckDrift && performance.now() - slot.lastSeekAt > 2000 && Math.abs(player.getCurrentTime() - expected) > settings.driftTolerance) {
+		Log(`Player ${slot.id} drifted (${player.getCurrentTime().toFixed(1)}s, expected ${expected.toFixed(1)}s); seeking`);
 		player.seekTo(expected, true);
 		slot.lastSeekAt = performance.now();
 	}
@@ -232,6 +254,7 @@ function SyncEmitter(emitterId) {
 }
 
 function OnSlotStateChange(slot, event) {
+	Log(`Player ${slot.id} (speaker ${slot.emitterId}, ${slot.videoId}) is now ${DescribeState(event.data)}`);
 	if (event.data === playerState.playing && !slot.reportedReady && slot.emitterId !== null) {
 		slot.reportedReady = true;
 		Post('VideoReady', { id: slot.emitterId, videoId: slot.videoId, duration: slot.player.getDuration() }).catch(() => {});
@@ -239,6 +262,7 @@ function OnSlotStateChange(slot, event) {
 }
 
 function OnSlotError(slot, event) {
+	Log(`Player ${slot.id} error ${event.data} on ${slot.videoId} (2 = bad id, 5 = HTML5 error, 100 = removed/private, 101/150 = embedding disabled)`);
 	slot.errored = true;
 	if (slot.emitterId !== null) {
 		Post('VideoError', { id: slot.emitterId, videoId: slot.videoId, code: event.data }).catch(() => {});
@@ -297,7 +321,9 @@ window.addEventListener('message', (event) => {
 				maxActivePlayers: data.maxActivePlayers,
 				driftTolerance: data.driftTolerance,
 				idlePlayerLifetime: data.idlePlayerLifetime,
+				debug: data.debug === true,
 			};
+			Log(`Initialised: up to ${settings.maxActivePlayers} players, YouTube API ${window.YT?.loaded ? 'loaded' : 'still loading'}`);
 			break;
 		case 'SetEmitter':
 			SetEmitter(data.id, data.emitter);

@@ -152,12 +152,30 @@ local function UpdateActiveEmitters()
         end
     end
 
+    -- Only log when the set of speakers changes; volume changes while walking would flood the console.
+    local membershipChanged = false
+    for serverId in pairs(newVolumes) do
+        if activeVolumes[serverId] == nil then
+            membershipChanged = true
+        end
+    end
+    for serverId in pairs(activeVolumes) do
+        if newVolumes[serverId] == nil then
+            membershipChanged = true
+        end
+    end
+
     activeVolumes = newVolumes
 
     if changed and nuiReady then
         local payload = {}
+        local described = {}
         for serverId, volume in pairs(newVolumes) do
             payload[tostring(serverId)] = volume
+            described[#described + 1] = ('%s @ %d'):format(serverId, volume)
+        end
+        if membershipChanged then
+            DebugPrint('Audible speakers: %s', #described > 0 and table.concat(described, ', ') or 'none')
         end
         SendNUIMessage({ action = 'SetActive', volumes = payload })
     end
@@ -187,6 +205,9 @@ RegisterNetEvent('Frantic_Youtube:client:SetEmitter', function(serverId, emitter
 
     if emitter then
         emitter.receivedAt = GetGameTimer()
+        DebugPrint('Speaker %s: state %s, video %s "%s", position %.1f/%.1f', serverId, emitter.state, emitter.videoId, emitter.title, emitter.position, emitter.duration)
+    else
+        DebugPrint('Speaker %s removed', serverId)
     end
     emitters[serverId] = emitter
     SendEmitterToNui(serverId)
@@ -198,11 +219,14 @@ end)
 
 RegisterNetEvent('Frantic_Youtube:client:SetEmitters', function(allEmitters)
     local now = GetGameTimer()
+    local count = 0
     emitters = {}
     for serverId, emitter in pairs(allEmitters or {}) do
         emitter.receivedAt = now
         emitters[tonumber(serverId)] = emitter
+        count = count + 1
     end
+    DebugPrint('Received speaker snapshot: %d speakers', count)
     SendAllEmittersToNui()
     NotifyOwnVideo()
 end)
@@ -225,12 +249,14 @@ end)
 -- ========================
 
 RegisterNUICallback('NuiReady', function(_, cb)
+    DebugPrint('YouTube page ready')
     nuiReady = true
     SendNUIMessage({
         action = 'Init',
         maxActivePlayers = Config.maxActivePlayers,
         driftTolerance = Config.driftTolerance,
         idlePlayerLifetime = Config.idlePlayerLifetime,
+        debug = Config.debug,
     })
     SendAllEmittersToNui()
 
@@ -241,6 +267,7 @@ end)
 
 -- The page reports for any speaker it plays; only the owner's report means anything to the server.
 RegisterNUICallback('VideoReady', function(data, cb)
+    DebugPrint('Player for speaker %s started %s (duration %s)', tostring(data.id), tostring(data.videoId), tostring(data.duration))
     if tonumber(data.id) == GetOwnServerId() then
         TriggerServerEvent('Frantic_Youtube:server:ReportVideoReady', { videoId = data.videoId, duration = data.duration })
     end
@@ -248,9 +275,16 @@ RegisterNUICallback('VideoReady', function(data, cb)
 end)
 
 RegisterNUICallback('VideoError', function(data, cb)
+    DebugPrint('^1Player for speaker %s failed on %s with YouTube error %s^7', tostring(data.id), tostring(data.videoId), tostring(data.code))
     if tonumber(data.id) == GetOwnServerId() then
         TriggerServerEvent('Frantic_Youtube:server:ReportVideoError', { videoId = data.videoId, code = data.code })
     end
+    cb('ok')
+end)
+
+-- The page's console isn't visible in game, so it forwards its log lines here when Config.debug is on.
+RegisterNUICallback('Log', function(data, cb)
+    DebugPrint('[page] %s', tostring(data.message))
     cb('ok')
 end)
 
@@ -264,7 +298,9 @@ RegisterCommand('playvideo', function(_, args)
         return
     end
 
+    DebugPrint('/playvideo %s', args[1])
     QBCore.Functions.TriggerCallback('Frantic_Youtube:server:PlayVideoWithID', function(result)
+        DebugPrint('/playvideo result: %s', result and result.title or 'refused (see server console)')
         if not result then
             QBCore.Functions.Notify('Couldn\'t play that video', 'error')
         end

@@ -1,5 +1,8 @@
 Config = Config or {}
 
+-- Print what happens (searches, plays, pauses, seeks, player pool changes) to the server console and the F8 console.
+Config.debug = true
+
 -- ========================
 -- Audibility
 -- ========================
@@ -42,3 +45,18 @@ Config.maxHistory = 100 -- Played videos remembered per citizen; oldest are drop
 Config.maxPlaylists = 50
 Config.maxPlaylistSize = 200
 Config.maxPlaylistNameLength = 50
+
+-- ========================
+-- Search
+-- ========================
+
+-- Searches run on the server. With the convar below set, the YouTube Data API v3 is used (100 quota units per search; the free quota is 10,000 a day).
+-- Without it, the server reads YouTube's own results page, which needs no key but can break whenever YouTube changes that page.
+-- The key is a convar on purpose: this file is shared, so every client downloads it.
+--   set frantic_youtube_api_key "YOUR_KEY"
+-- 'multiple': keywords return up to searchResultCount videos, and a pasted link returns that one video.
+-- 'single': only pasted links/IDs work (checked through oEmbed); keyword searches return nothing. Fallback for when keyword search breaks or you don't want it.
+Config.searchMode = 'multiple'
+Config.searchResultCount = 8 -- (1 - 20)
+Config.searchCooldown = 1500 -- ms between searches from one player
+Config.searchCacheLifetime = 600 -- seconds a query's results are reused

@@ -10,6 +10,7 @@ ui_page 'html/index.html'
 
 shared_script {
 	"config.lua",
+	"shared/debug.lua",
 }
 
 client_script {
