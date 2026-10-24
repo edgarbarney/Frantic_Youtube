@@ -1,5 +1,15 @@
 QBCore = exports['qb-core']:GetCoreObject()
 
+-- Prints to the F8 console when Config.debug is on. Local to this file for the same reason as in server.lua.
+local function DebugPrint(message, ...)
+    if not Config.debug then
+        return
+    end
+
+    local ok, text = pcall(string.format, message, ...)
+    print('^5[Frantic_Youtube]^7 ' .. (ok and text or message))
+end
+
 -- ========================
 -- State
 -- ========================

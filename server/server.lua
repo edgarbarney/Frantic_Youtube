@@ -1,5 +1,17 @@
 QBCore = exports['qb-core']:GetCoreObject()
 
+-- Prints to the server console when Config.debug is on.
+-- Local to this file on purpose: a separate shared script is only loaded after a manifest refresh, and when it was missing every debug line crashed its callback before it could answer.
+-- message is a string.format template; pass values as extra arguments so a '%' inside a video title can't break the format.
+local function DebugPrint(message, ...)
+    if not Config.debug then
+        return
+    end
+
+    local ok, text = pcall(string.format, message, ...)
+    print('^5[Frantic_Youtube]^7 ' .. (ok and text or message))
+end
+
 -- ========================
 -- State
 -- ========================
