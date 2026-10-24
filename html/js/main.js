@@ -1,197 +1,341 @@
-// Get NUI message
+// Speakers the server knows about, keyed by owner server id (string).
+// receivedAt is performance.now() at arrival; positions are extrapolated from it.
+const emitters = new Map();
 
-let YTPlayers = {};
+// Fixed pool of YouTube players. Each one is a full Chromium iframe decoding video, so the pool never grows past settings.maxActivePlayers.
+// Slots are reused between speakers and destroyed after sitting idle, so a client with nobody playing nearby has no iframes at all.
+const slots = [];
 
-function onYouTubeIframeAPIReady() {
+let settings = {
+	maxActivePlayers: 3,
+	driftTolerance: 3.0,
+	idlePlayerLifetime: 60,
+};
 
-}
+let nextSlotId = 0;
 
-function onPlayerStateChange(event) {
-    if (event.data == YT.PlayerState.ENDED) {
-        // Video has finished playing
-        //console.log('Video finished');
-		//console.log(event.target.getVideoData().video_id);
-        // You can perform additional actions here
-    }
-}
+const resourceName = GetParentResourceName();
 
-function onPlayerReadyPromise() {
-	return new Promise((resolve) => {
-		window.onPlayerReadyResolve = resolve;
-	});
-}
-function onPlayerReady(event) {
-	//event.target.playVideo();
-	//window.onPlayerReadyResolve();
-	window.onPlayerReadyResolve?.();
-}
+const playerState = {
+	unstarted: -1,
+	ended: 0,
+	playing: 1,
+	paused: 2,
+	buffering: 3,
+	cued: 5,
+};
 
-async function PlayVideoWithID(vidSourceID, videoID) {
-	if (!(vidSourceID in YTPlayers)) {
-		allocateNewPlayer(vidSourceID);
-		//console.log('Waiting for player to be ready');
-		await onPlayerReadyPromise(); // We have to wait until the player is ready otherwise the video won't play
-	}
-	YTPlayers[vidSourceID].loadVideoById(videoID);
+const emitterState = {
+	stopped: 0,
+	playing: 1,
+	paused: 2,
+};
 
-	// We have to wait until the video is loaded otherwise the video won't play
-	new Promise((resolve) => {
-		let interval = setInterval(() => {
-			// Cued, playing or paused
-			if (YTPlayers[vidSourceID].getPlayerState() == 5 || YTPlayers[vidSourceID].getPlayerState() == 1 || YTPlayers[vidSourceID].getPlayerState() == 2) {
-				clearInterval(interval);
-				resolve();
-			}
-		}, 1000);
-	});
-
-	YTPlayers[vidSourceID].unMute();
-	YTPlayers[vidSourceID].playVideo();
-}
-
-function UpdateVideoData(vidSourceID, videoData) {
-	if (vidSourceID in YTPlayers) {
-		if (YTPlayers[vidSourceID].getVideoUrl?.() == undefined) {
-			return;
-		}
-
-		// Update Video if it's different
-		if (videoData.videoUrl == YoutubeTools.GetYouTubeVideoId(YTPlayers[vidSourceID].getVideoUrl())) {
-		} else {
-			YTPlayers[vidSourceID].cueVideoById(videoData.videoUrl);
-		}
-
-		//console.log(JSON.stringify(videoData));
-
-		// Check if video is finished
-		//if (videoData.videoCurrentTime > videoData.videoDuration) {
-		//	YTPlayers[vidSourceID].pauseVideo();
-		//	return;
-		//}
-
-		// Update Video Status if it's different
-		if (YTPlayers[vidSourceID].getPlayerState() != videoData.videoState) {
-			if (videoData.videoState == 1) {
-				YTPlayers[vidSourceID].playVideo();
-				YTPlayers[vidSourceID].seekTo(videoData.videoCurrentTime);
-				if (videoData.videoLoaded == false) {
-					$.post('https://' + Config.ResourceFolderName + '/SetVideoLoaded', JSON.stringify({ vidSrcID: vidSourceID, vidLoaded: true }));
-				}
-			} else if (videoData.videoState == 2) {
-				YTPlayers[vidSourceID].pauseVideo();
-				YTPlayers[vidSourceID].seekTo(videoData.videoCurrentTime);
-			} else if (videoData.videoState == 0) {
-				YTPlayers[vidSourceID].stopVideo();
-			}
-		}
-
-		// Update Video Time if it's too different
-		if (videoData.videoState != 0 && Math.abs(YTPlayers[vidSourceID].getCurrentTime() - videoData.videoCurrentTime) > 5) {
-			YTPlayers[vidSourceID].seekTo(videoData.videoCurrentTime);
-		}
-
-		// Update Video Volume if it's different
-		//if (YTPlayers[vidSourceID].getVolume() != videoData.videoVolume) {
-			YTPlayers[vidSourceID].setVolume(videoData.videoVolume);
-		//}
-
-		//YTPlayers[vidSourceID].seekTo(videoData.sec);
-	} else {
-		allocateNewPlayer(vidSourceID);
-	}
-}
-
-// SourceID format: playerid-1, playerid-2, playerid-3, etc.
-function allocateNewPlayer(vidSourceID) {
-	// Find div with id "mainpage" and create a new div element inside it
-	var mainpageDiv = document.getElementById('mainpage');
-	var playerDiv = document.createElement('div');
-	mainpageDiv.appendChild(playerDiv);
-	//playerDiv.id = 'YTPlayer-' + YTPlayers.length;
-	playerDiv.id = 'YTPlayer-' + vidSourceID;
-
-	player = new YT.Player(playerDiv.id, {
-		height: '0',
-		width: '0',
-		//videoId: 'v7UF4KJJ1-o?autoplay=1',
-		videoId: '',
-		playerVars: {
-			'autoplay': 0, // Set autoplay to 1 to enable autoplay
-			'suggestedQuality': 'medium'
-		},
-		events: {
-			'onStateChange': onPlayerStateChange,
-			'onReady': onPlayerReady,
-		},
-	});
-
-	YTPlayers[vidSourceID] = player;
-}
-
-$(document).ready(function(){
-    window.addEventListener('message', async function(event) {
-        switch(event.data.action) {
-			/*
-            case 'SetURL':
-				player.loadVideoById(event.data.url);
-				break;
-			case 'SetSec':
-				player.seekTo(event.data.sec);
-				break;
-			*/
-			case 'GetVideoDataFromID':
-				let dataToSend = await GetVideoDataFromID(event.data.vidSourceID, event.data.videoID);
-				$.post('https://' + Config.ResourceFolderName + '/ReceiveVideoData', JSON.stringify(dataToSend));
-				break;
-			case 'PlayVideoWithID':
-				PlayVideoWithID(event.data.vidSourceID, event.data.videoID);
-				break;
-			case 'UpdateVideoData':
-				UpdateVideoData(event.data.videoSourceID, event.data.videoData);
-				break;
-			//case  
-		}
-	})
+// Defined before iframe_api loads (see index.html), so the API can't become ready before anyone listens.
+const youtubeReady = new Promise((resolve) => {
+	window.onYouTubeIframeAPIReady = resolve;
 });
 
-const GetVideoDataFromID = async (vidSourceID, videoID) => {
-	//if (YTPlayers[vidSourceID] !== undefined) {
-	if (!(vidSourceID in YTPlayers)) {
-		allocateNewPlayer(vidSourceID);
-		await onPlayerReadyPromise(); // We have to wait until the player is ready otherwise the video won't play
-	}
-	// Wrap the $.getJSON call in a promise to wait for its completion
-    const videoData = await new Promise((resolve, reject) => {
-        $.getJSON('https://noembed.com/embed', {format: 'json', url: 'https://www.youtube.com/watch?v=' + videoID }, function (data) {
-            resolve(data);
-        });
-    });
+// ========================
+// Helpers
+// ========================
 
-    YTPlayers[vidSourceID].loadVideoById(videoID);
-	YTPlayers[vidSourceID].mute(); // Just in case, player shouldn't hear this
-
-	// We have to wait until the video is loaded otherwise the video won't play
-	await new Promise((resolve) => {
-		let interval = setInterval(() => {
-			// Cued, playing or paused
-			if (YTPlayers[vidSourceID].getPlayerState() == 5 || YTPlayers[vidSourceID].getPlayerState() == 1 || YTPlayers[vidSourceID].getPlayerState() == 2) {
-				clearInterval(interval);
-				resolve();
-			}
-		}, 1000);
+function Post(name, data) {
+	return fetch(`https://${resourceName}/${name}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+		body: JSON.stringify(data ?? {}),
 	});
-
-    let videoDuration = YTPlayers[vidSourceID].getDuration();
-	YTPlayers[vidSourceID].pauseVideo();
-	YTPlayers[vidSourceID].unMute();
-    let videoTitle = videoData.title;
-    let videoChannel = videoData.author_name.replace(' - Topic', '');
-
-    return {
-        url: videoID,
-        title: videoTitle,
-        author: videoChannel,
-        duration: videoDuration,
-        vidSourceID: vidSourceID
-    };
 }
+
+function ExpectedPosition(emitter) {
+	let position = emitter.position;
+	if (emitter.state === emitterState.playing) {
+		position += (performance.now() - emitter.receivedAt) / 1000;
+	}
+	if (emitter.duration > 0) {
+		position = Math.min(position, emitter.duration);
+	}
+	return Math.max(0, position);
+}
+
+// ========================
+// Slots
+// ========================
+
+// The slot is registered synchronously so two assignments in a row can't both claim a free position in the pool.
+// Each slot resolves its own ready promise; the old single global resolver lost every player but the last when two were created at once.
+function CreateSlot() {
+	const slot = {
+		id: nextSlotId++,
+		player: null,
+		isReady: false,
+		destroyed: false,
+		pendingSync: false,
+		emitterId: null,
+		videoId: null,
+		volume: 0,
+		appliedVolume: null,
+		errored: false,
+		reportedReady: false,
+		lastSeekAt: 0,
+		releasedAt: performance.now(),
+	};
+
+	slot.ready = youtubeReady.then(() => new Promise((resolve) => {
+		const element = document.createElement('div');
+		element.id = 'YTPlayer-' + slot.id;
+		document.getElementById('players').appendChild(element);
+
+		slot.player = new YT.Player(element.id, {
+			height: '0',
+			width: '0',
+			playerVars: {
+				autoplay: 0,
+				controls: 0,
+				disablekb: 1,
+				playsinline: 1,
+			},
+			events: {
+				onReady: () => {
+					slot.isReady = true;
+					resolve();
+				},
+				onStateChange: (event) => OnSlotStateChange(slot, event),
+				onError: (event) => OnSlotError(slot, event),
+			},
+		});
+	}));
+
+	slots.push(slot);
+	return slot;
+}
+
+function DestroySlot(slot) {
+	slot.destroyed = true;
+	const iframe = slot.player.getIframe?.();
+	slot.player.destroy();
+	iframe?.remove();
+	document.getElementById('YTPlayer-' + slot.id)?.remove();
+	slots.splice(slots.indexOf(slot), 1);
+}
+
+function AssignSlot(emitterId) {
+	let slot = slots.find((candidate) => candidate.emitterId === null && !candidate.destroyed);
+	if (!slot) {
+		if (slots.length >= settings.maxActivePlayers) {
+			return null;
+		}
+		slot = CreateSlot();
+	}
+
+	slot.emitterId = emitterId;
+	return slot;
+}
+
+function ReleaseSlot(slot) {
+	slot.emitterId = null;
+	slot.releasedAt = performance.now();
+	if (slot.isReady && slot.videoId !== null) {
+		// stopVideo also stops buffering, so a released slot stops using bandwidth.
+		slot.player.stopVideo();
+	}
+	slot.videoId = null;
+}
+
+function FindSlot(emitterId) {
+	return slots.find((slot) => slot.emitterId === emitterId);
+}
+
+// Brings one slot's player in line with its speaker. Safe to call as often as needed: it only touches the player when something differs.
+function SyncSlot(slot) {
+	if (slot.destroyed || slot.emitterId === null) {
+		return;
+	}
+
+	if (!slot.isReady) {
+		if (!slot.pendingSync) {
+			slot.pendingSync = true;
+			slot.ready.then(() => {
+				slot.pendingSync = false;
+				SyncSlot(slot);
+			});
+		}
+		return;
+	}
+
+	const player = slot.player;
+	const emitter = emitters.get(slot.emitterId);
+	if (!emitter || emitter.state === emitterState.stopped) {
+		if (slot.videoId !== null) {
+			player.stopVideo();
+			slot.videoId = null;
+		}
+		return;
+	}
+
+	if (slot.appliedVolume !== slot.volume) {
+		player.setVolume(slot.volume);
+		slot.appliedVolume = slot.volume;
+	}
+
+	const expected = ExpectedPosition(emitter);
+
+	if (slot.videoId !== emitter.videoId) {
+		slot.videoId = emitter.videoId;
+		slot.errored = false;
+		slot.reportedReady = false;
+		slot.lastSeekAt = performance.now();
+
+		const request = { videoId: emitter.videoId, startSeconds: expected };
+		if (emitter.state === emitterState.playing) {
+			player.loadVideoById(request);
+		} else {
+			player.cueVideoById(request);
+		}
+		player.unMute();
+		return;
+	}
+
+	if (slot.errored) {
+		return;
+	}
+
+	const state = player.getPlayerState();
+
+	// An ended player is left alone: the server ends the speaker within a second, and calling playVideo() here would restart it from 0.
+	if (state === playerState.ended) {
+		return;
+	}
+
+	if (emitter.state === emitterState.playing) {
+		if (state !== playerState.playing && state !== playerState.buffering) {
+			player.playVideo();
+		}
+	} else if (state === playerState.playing || state === playerState.buffering) {
+		player.pauseVideo();
+	}
+
+	// Seeks are rate limited, since a seek during buffering otherwise retriggers itself every tick.
+	const canCheckDrift = state === playerState.playing || state === playerState.paused;
+	if (canCheckDrift && performance.now() - slot.lastSeekAt > 2000 && Math.abs(player.getCurrentTime() - expected) > settings.driftTolerance) {
+		player.seekTo(expected, true);
+		slot.lastSeekAt = performance.now();
+	}
+}
+
+function SyncEmitter(emitterId) {
+	const slot = FindSlot(emitterId);
+	if (slot) {
+		SyncSlot(slot);
+	}
+}
+
+function OnSlotStateChange(slot, event) {
+	if (event.data === playerState.playing && !slot.reportedReady && slot.emitterId !== null) {
+		slot.reportedReady = true;
+		Post('VideoReady', { id: slot.emitterId, videoId: slot.videoId, duration: slot.player.getDuration() }).catch(() => {});
+	}
+}
+
+function OnSlotError(slot, event) {
+	slot.errored = true;
+	if (slot.emitterId !== null) {
+		Post('VideoError', { id: slot.emitterId, videoId: slot.videoId, code: event.data }).catch(() => {});
+	}
+}
+
+// ========================
+// Messages
+// ========================
+
+function SetEmitter(id, emitter) {
+	if (emitter) {
+		emitter.receivedAt = performance.now();
+		emitters.set(id, emitter);
+	} else {
+		emitters.delete(id);
+	}
+	SyncEmitter(id);
+}
+
+function SetEmitters(allEmitters) {
+	emitters.clear();
+	const now = performance.now();
+	for (const [id, emitter] of Object.entries(allEmitters ?? {})) {
+		emitter.receivedAt = now;
+		emitters.set(id, emitter);
+	}
+	slots.forEach(SyncSlot);
+}
+
+// volumes holds exactly the speakers that should have a player, chosen by the client script, with their volume (0 - 100).
+function SetActive(volumes) {
+	volumes = volumes ?? {};
+
+	for (const slot of slots) {
+		if (slot.emitterId !== null && !(slot.emitterId in volumes)) {
+			ReleaseSlot(slot);
+		}
+	}
+
+	for (const [id, volume] of Object.entries(volumes)) {
+		const slot = FindSlot(id) ?? AssignSlot(id);
+		if (!slot) {
+			continue;
+		}
+		slot.volume = volume;
+		SyncSlot(slot);
+	}
+}
+
+window.addEventListener('message', (event) => {
+	const data = event.data;
+	switch (data.action) {
+		case 'Init':
+			settings = {
+				maxActivePlayers: data.maxActivePlayers,
+				driftTolerance: data.driftTolerance,
+				idlePlayerLifetime: data.idlePlayerLifetime,
+			};
+			break;
+		case 'SetEmitter':
+			SetEmitter(data.id, data.emitter);
+			break;
+		case 'SetEmitters':
+			SetEmitters(data.emitters);
+			break;
+		case 'SetActive':
+			SetActive(data.volumes);
+			break;
+		default:
+			break;
+	}
+});
+
+// Drift correction and idle cleanup.
+setInterval(() => {
+	const now = performance.now();
+	for (const slot of [...slots]) {
+		if (slot.emitterId !== null) {
+			SyncSlot(slot);
+		} else if (slot.isReady && !slot.destroyed && now - slot.releasedAt > settings.idlePlayerLifetime * 1000) {
+			DestroySlot(slot);
+		}
+	}
+}, 1000);
+
+// The client script may not have registered its callbacks yet when the page loads, so keep asking until it answers.
+(async function AnnounceReady() {
+	for (let attempt = 0; attempt < 60; attempt++) {
+		try {
+			const response = await Post('NuiReady', {});
+			if (response.ok) {
+				return;
+			}
+		} catch (error) {
+			// Not registered yet
+		}
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+	}
+})();

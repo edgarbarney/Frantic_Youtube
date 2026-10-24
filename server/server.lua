@@ -1,527 +1,651 @@
 QBCore = exports['qb-core']:GetCoreObject()
 
-function print_table(node)
-    local cache, stack, output = {},{},{}
-    local depth = 1
-    local output_str = "{\n"
+-- ========================
+-- State
+-- ========================
 
-    while true do
-        local size = 0
-        for k,v in pairs(node) do
-            size = size + 1
-        end
+local stateStopped = 0
+local statePlaying = 1
+local statePaused = 2
 
-        local cur_index = 1
-        for k,v in pairs(node) do
-            if (cache[node] == nil) or (cur_index >= cache[node]) then
+-- Speakers that currently have a video, keyed by the owner's server id.
+-- An entry only exists between a play request and the owner dropping; nothing creates one as a side effect of a lookup.
+-- Position is stored as an anchor (position at anchorTime) instead of a ticking counter, so it never drifts and needs no per-second update.
+local emitters = {}
 
-                if (string.find(output_str,"}",output_str:len())) then
-                    output_str = output_str .. ",\n"
-                elseif not (string.find(output_str,"\n",output_str:len())) then
-                    output_str = output_str .. "\n"
-                end
+-- Per-player copy of their database row, so read-modify-write requests from one player can't interleave and lose each other's changes.
+local citizenCache = {}
 
-                -- This is necessary for working with HUGE tables otherwise we run out of memory using concat on huge strings
-                table.insert(output,output_str)
-                output_str = ""
+-- oEmbed results by video id. Durations are filled in once an owner's player reports them.
+local metadataCache = {}
+local metadataCacheSize = 0
+local maxMetadataCacheSize = 1000
 
-                local key
-                if (type(k) == "number" or type(k) == "boolean") then
-                    key = "["..tostring(k).."]"
-                else
-                    key = "['"..tostring(k).."']"
-                end
+local lastPlayRequest = {}
 
-                if (type(v) == "number" or type(v) == "boolean") then
-                    output_str = output_str .. string.rep('\t',depth) .. key .. " = "..tostring(v)
-                elseif (type(v) == "table") then
-                    output_str = output_str .. string.rep('\t',depth) .. key .. " = {\n"
-                    table.insert(stack,node)
-                    table.insert(stack,v)
-                    cache[node] = cur_index+1
-                    break
-                else
-                    output_str = output_str .. string.rep('\t',depth) .. key .. " = '"..tostring(v).."'"
-                end
+local videoIdPatterns = {
+    '[?&]v=([%w_-]+)', -- Normal
+    'youtu%.be/([%w_-]+)', -- Shortened
+    'embed/([%w_-]+)', -- Embed
+    'shorts/([%w_-]+)', -- Shorts
+    'live/([%w_-]+)', -- Live
+}
 
-                if (cur_index == size) then
-                    output_str = output_str .. "\n" .. string.rep('\t',depth-1) .. "}"
-                else
-                    output_str = output_str .. ","
-                end
-            else
-                -- close the table
-                if (cur_index == size) then
-                    output_str = output_str .. "\n" .. string.rep('\t',depth-1) .. "}"
-                end
-            end
+-- ========================
+-- Helpers
+-- ========================
 
-            cur_index = cur_index + 1
-        end
+-- Returns nil for anything that isn't a finite number, so NaN/inf from a client can't poison the timeline.
+local function ToClampedNumber(value, min, max)
+    value = tonumber(value)
+    if not value or value ~= value or value == math.huge or value == -math.huge then
+        return nil
+    end
+    return math.max(min, math.min(max, value))
+end
 
-        if (size == 0) then
-            output_str = output_str .. "\n" .. string.rep('\t',depth-1) .. "}"
-        end
+local function ExtractVideoId(input)
+    if type(input) ~= 'string' or #input > 300 then
+        return nil
+    end
 
-        if (#stack > 0) then
-            node = stack[#stack]
-            stack[#stack] = nil
-            depth = cache[node] == nil and depth + 1 or depth - 1
-        else
-            break
+    if #input == 11 and input:match('^[%w_-]+$') then
+        return input
+    end
+
+    for _, pattern in ipairs(videoIdPatterns) do
+        local id = input:match(pattern)
+        if id and #id == 11 then
+            return id
         end
     end
 
-    -- This is necessary for working with HUGE tables otherwise we run out of memory using concat on huge strings
-    table.insert(output,output_str)
-    output_str = table.concat(output)
-
-    print(output_str)
+    return nil
 end
 
-function getTablelength(T)
-    local count = 0
-    for _ in pairs(T) do count = count + 1 end
-    return count
+local function GetYoutubeMetadata(Player)
+    local metadata = Player.PlayerData.metadata['FranticYoutube'] or {}
+    return {
+        ListenerVolume = ToClampedNumber(metadata.ListenerVolume, 0.0, 1.0) or Config.defaultListenerVolume,
+        SpeakerVolume = ToClampedNumber(metadata.SpeakerVolume, 0.0, 1.0) or Config.defaultSpeakerVolume,
+    }
 end
 
-local globalVideoTimer = 0 -- Serverside timer to keep track of the video time in seconds
+-- Lists used to be stored with a [0] first index, which JSON turns into an object with "0", "1"... keys.
+-- This turns both that legacy shape and plain arrays into a 1-based Lua array.
+-- Every entry is a video or playlist table; anything else is corrupt and dropped.
+local function NormaliseList(value)
+    if type(value) ~= 'table' then
+        return {}
+    end
 
-local lastVideoData = {} -- Array to store the last video data for a citizen
+    local keys = {}
+    for key, entry in pairs(value) do
+        local index = tonumber(key)
+        if index and type(entry) == 'table' then
+            keys[#keys + 1] = { index = index, key = key }
+        end
+    end
+    table.sort(keys, function(a, b) return a.index < b.index end)
 
--- Except source_0, all other ids are networked
-local vidSourceTable = {}
+    local list = {}
+    for _, entry in ipairs(keys) do
+        list[#list + 1] = value[entry.key]
+    end
+    return list
+end
 
+local function DecodeList(text)
+    if type(text) ~= 'string' or text == '' then
+        return {}
+    end
+
+    local ok, value = pcall(json.decode, text)
+    if not ok then
+        return {}
+    end
+    return NormaliseList(value)
+end
+
+local function NormalisePlaylists(playlists)
+    local nextId = 1
+    for _, playlist in ipairs(playlists) do
+        local id = tonumber(playlist.id)
+        if id and id >= nextId then
+            nextId = id + 1
+        end
+    end
+
+    local seenIds = {}
+    for _, playlist in ipairs(playlists) do
+        playlist.videos = NormaliseList(playlist.videos)
+        local id = tonumber(playlist.id)
+        if not id or seenIds[id] then
+            id = nextId
+            nextId = nextId + 1
+        end
+        playlist.id = id
+        seenIds[id] = true
+    end
+    return playlists
+end
+
+local function FindVideoIndex(list, videoId)
+    for index, video in ipairs(list) do
+        if video.url == videoId then
+            return index
+        end
+    end
+    return nil
+end
+
+-- ========================
+-- Citizen Data
+-- ========================
+
+local function GetCitizenData(src)
+    local Player = QBCore.Functions.GetPlayer(src)
+    if not Player then
+        return nil
+    end
+
+    local citizenId = Player.PlayerData.citizenid
+    local cached = citizenCache[src]
+    if cached and cached.citizenId == citizenId then
+        while cached.loading do
+            Wait(50)
+        end
+        return (not cached.failed) and cached or nil
+    end
+
+    cached = { citizenId = citizenId, loading = true, videos = {}, playlists = {} }
+    citizenCache[src] = cached
+
+    local ok, err = pcall(function()
+        local row = MySQL.single.await('SELECT videos, playlists FROM frantic_youtube_citizens WHERE citizenid = ?', { citizenId })
+        if row then
+            cached.videos = DecodeList(row.videos)
+            cached.playlists = NormalisePlaylists(DecodeList(row.playlists))
+        else
+            MySQL.insert.await('INSERT INTO frantic_youtube_citizens (citizenid, playlists, videos) VALUES (?, ?, ?)', { citizenId, '[]', '[]' })
+        end
+    end)
+
+    cached.loading = false
+    if not ok then
+        print(('^1[Frantic_Youtube] Failed to load data for %s: %s^7'):format(citizenId, err))
+        cached.failed = true
+        if citizenCache[src] == cached then
+            citizenCache[src] = nil
+        end
+        return nil
+    end
+
+    return cached
+end
+
+local function SaveVideos(citizenData)
+    MySQL.update('UPDATE frantic_youtube_citizens SET videos = ? WHERE citizenid = ?', { json.encode(citizenData.videos), citizenData.citizenId })
+end
+
+local function SavePlaylists(citizenData)
+    MySQL.update('UPDATE frantic_youtube_citizens SET playlists = ? WHERE citizenid = ?', { json.encode(citizenData.playlists), citizenData.citizenId })
+end
+
+local function AddToHistory(citizenData, video)
+    local index = FindVideoIndex(citizenData.videos, video.url)
+    if index then
+        table.remove(citizenData.videos, index)
+    end
+    citizenData.videos[#citizenData.videos + 1] = video
+
+    while #citizenData.videos > Config.maxHistory do
+        table.remove(citizenData.videos, 1)
+    end
+    SaveVideos(citizenData)
+end
+
+-- Fill in a duration that wasn't known when the video was first saved.
+local function UpdateStoredDuration(citizenData, videoId, duration)
+    local index = FindVideoIndex(citizenData.videos, videoId)
+    if index and (tonumber(citizenData.videos[index].duration) or 0) <= 0 then
+        citizenData.videos[index].duration = duration
+        SaveVideos(citizenData)
+    end
+
+    local playlistsChanged = false
+    for _, playlist in ipairs(citizenData.playlists) do
+        local playlistIndex = FindVideoIndex(playlist.videos, videoId)
+        if playlistIndex and (tonumber(playlist.videos[playlistIndex].duration) or 0) <= 0 then
+            playlist.videos[playlistIndex].duration = duration
+            playlistsChanged = true
+        end
+    end
+    if playlistsChanged then
+        SavePlaylists(citizenData)
+    end
+end
+
+-- ========================
+-- Video Metadata
+-- ========================
+
+-- Title and author come from YouTube's own oEmbed endpoint on the server, never from a client, so a modded client can't store arbitrary text in someone's library.
+-- oEmbed also refuses videos that can't be embedded, which the iframe player couldn't play anyway.
+local function FetchVideoMetadata(videoId)
+    local cached = metadataCache[videoId]
+    if cached then
+        return cached
+    end
+
+    local p = promise.new()
+    local settled = false
+    local function Settle(value)
+        if not settled then
+            settled = true
+            p:resolve(value)
+        end
+    end
+
+    local url = 'https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D' .. videoId
+    PerformHttpRequest(url, function(status, body)
+        if status ~= 200 or type(body) ~= 'string' then
+            Settle(nil)
+            return
+        end
+
+        local ok, data = pcall(json.decode, body)
+        if not ok or type(data) ~= 'table' or type(data.title) ~= 'string' then
+            Settle(nil)
+            return
+        end
+
+        local author = type(data.author_name) == 'string' and data.author_name or ''
+        Settle({
+            title = data.title:sub(1, 200),
+            author = (author:gsub(' %- Topic$', '')):sub(1, 100),
+            duration = 0,
+        })
+    end, 'GET')
+
+    SetTimeout(Config.metadataTimeout, function()
+        Settle(nil)
+    end)
+
+    local metadata = Citizen.Await(p)
+    if metadata then
+        if metadataCacheSize >= maxMetadataCacheSize then
+            metadataCache = {}
+            metadataCacheSize = 0
+        end
+        if not metadataCache[videoId] then
+            metadataCacheSize = metadataCacheSize + 1
+        end
+        metadataCache[videoId] = metadata
+    end
+    return metadata
+end
+
+local function BuildVideoEntry(videoId, metadata)
+    return {
+        url = videoId,
+        title = metadata.title,
+        author = metadata.author,
+        duration = metadata.duration,
+    }
+end
+
+-- ========================
+-- Emitters
+-- ========================
+
+local function GetEmitterPosition(emitter)
+    local position = emitter.anchorPosition
+    if emitter.state == statePlaying then
+        position = position + (GetGameTimer() - emitter.anchorTime) / 1000.0
+    end
+    if emitter.duration > 0 then
+        position = math.min(position, emitter.duration)
+    end
+    return position
+end
+
+local function SetEmitterPosition(emitter, position)
+    emitter.anchorPosition = position
+    emitter.anchorTime = GetGameTimer()
+end
+
+-- Clients receive the position as of the moment this is sent and extrapolate from their own clock, so no shared clock is needed.
+local function BuildEmitterPayload(emitter)
+    return {
+        videoId = emitter.videoId,
+        title = emitter.title,
+        author = emitter.author,
+        duration = emitter.duration,
+        state = emitter.state,
+        position = GetEmitterPosition(emitter),
+        speakerVolume = emitter.speakerVolume,
+        loaded = emitter.loaded,
+    }
+end
+
+local function BroadcastEmitter(src)
+    local emitter = emitters[src]
+    TriggerClientEvent('Frantic_Youtube:client:SetEmitter', -1, src, emitter and BuildEmitterPayload(emitter) or nil)
+end
+
+local function RemoveEmitter(src)
+    if emitters[src] then
+        emitters[src] = nil
+        BroadcastEmitter(src)
+    end
+end
+
+-- Only work left on the server: notice when a playing video reaches its end. Touches only speakers that are playing.
 CreateThread(function()
     while true do
-        globalVideoTimer = globalVideoTimer + (Config.serverRefreshRate/1000)
-        Wait(Config.serverRefreshRate)
-        
-        for k, v in pairs(vidSourceTable) do
-            if vidSourceTable[k] then
-                if vidSourceTable[k].videoUrl ~= "" then
-                    if vidSourceTable[k].videoState == 1 then -- Playings
-                        vidSourceTable[k].videoCurrentTime = vidSourceTable[k].videoCurrentTime + (Config.serverRefreshRate/1000)
-                        vidSourceTable[k].videoSpeakerPosition = GetEntityCoords(GetPlayerPed(vidSourceTable[k].source))
-                    end
+        Wait(1000)
 
-                    if vidSourceTable[k].videoDuration > 0 and vidSourceTable[k].videoCurrentTime >= vidSourceTable[k].videoDuration then 
-                        vidSourceTable[k].videoStartTime = 0
-                        vidSourceTable[k].videoCurrentTime = vidSourceTable[k].videoDuration + 2
-                        vidSourceTable[k].videoState = 0 -- Ended
-                    end
-                end
+        for src, emitter in pairs(emitters) do
+            if emitter.state == statePlaying and emitter.duration > 0 and GetEmitterPosition(emitter) >= emitter.duration then
+                SetEmitterPosition(emitter, emitter.duration)
+                emitter.state = stateStopped
+                BroadcastEmitter(src)
             end
         end
-
-        TriggerClientEvent('Frantic_Youtube:client:UpdateVideoData', -1, vidSourceTable, globalVideoTimer)
     end
 end)
+
+-- ========================
+-- Playback Callbacks & Events
+-- ========================
 
 QBCore.Functions.CreateCallback('Frantic_Youtube:server:PlayVideoWithID', function(source, cb, data)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
-    local time = 0
-    local citizenId = Player.PlayerData.citizenid
-    local sourceId = FranticYoutube_Server_GetSourceID(src, data)
+    local videoId = ExtractVideoId(type(data) == 'table' and data.url or data)
+    if not Player or not videoId then
+        cb(false)
+        return
+    end
 
-    -- Now we don't store the video data in the database. We just store the video id in the citizen's data
+    local now = GetGameTimer()
+    if lastPlayRequest[src] and now - lastPlayRequest[src] < Config.playCooldown then
+        cb(false)
+        return
+    end
+    lastPlayRequest[src] = now
 
-    MySQL.Async.fetchAll("SELECT * FROM frantic_youtube_citizens WHERE citizenid = @citizenid", {
-        ["@citizenid"] = citizenId
-    }, function (citizenResult)
-        if citizenResult[1] == nil then
-            MySQL.insert('INSERT INTO frantic_youtube_citizens (citizenid, playlists, videos) VALUES (?, ?, ?)', {
-                citizenId,
-                "",
-                "",
-            })
-        end
+    local metadata = FetchVideoMetadata(videoId)
+    if not metadata or not QBCore.Functions.GetPlayer(src) then
+        cb(false)
+        return
+    end
 
-        lastVideoData[src] = "empty"
-        TriggerClientEvent('Frantic_Youtube:client:GetVideoDataFromID', src, data)
-
-        while lastVideoData[src] == "empty" do
-            Wait(100)
-            time = time + 100
-
-            if time > 5000 then -- 5 seconds, took to long. Error
-                cb("timeout")
-                break -- Not really needed lmao
-            end
-        end
-
-        local videoTable = {
-            ["url"] = lastVideoData[src]["url"],
-            ["title"] = lastVideoData[src]["title"],
-            ["author"] = lastVideoData[src]["author"],
-            ["duration"] = lastVideoData[src]["duration"],
-        }
-
-        local videos = json.decode(citizenResult[1].videos)
-        if videos == nil then
-            videos = {[0] = videoTable}
-        else
-            -- Check if video url already exists
-            for k, v in pairs(videos) do
-                if v.url == videoTable.url then
-                    vidSourceTable[sourceId].videoUrl = videoTable.url
-                    vidSourceTable[sourceId].videoStartTime = globalVideoTimer
-                    vidSourceTable[sourceId].videoCurrentTime = 0
-                    vidSourceTable[sourceId].videoDuration = videoTable.duration
-                    vidSourceTable[sourceId].videoState = 1
-                    vidSourceTable[sourceId].videoLoaded = false
-                    vidSourceTable[sourceId].videoSpeakerVolume = Player.PlayerData.metadata['FranticYoutube'].SpeakerVolume
-                    vidSourceTable[sourceId].videoSpeakerPosition = GetEntityCoords(GetPlayerPed(vidSourceTable[sourceId].source))
-                    cb(lastVideoData[src])
-                    return
-                end
-            end
-
-            videos[getTablelength(videos)] = videoTable
-        end
-
-        MySQL.Async.execute('UPDATE frantic_youtube_citizens SET videos = @videos WHERE citizenid = @citizenid', {
-            ["@citizenid"] = citizenId,
-            ["@videos"] = json.encode(videos)
-        })
-        vidSourceTable[sourceId].videoUrl = videoTable.url
-        vidSourceTable[sourceId].videoStartTime = globalVideoTimer
-        vidSourceTable[sourceId].videoCurrentTime = 0
-        vidSourceTable[sourceId].videoDuration = videoTable.duration
-        vidSourceTable[sourceId].videoState = 1
-        vidSourceTable[sourceId].videoLoaded = false
-        vidSourceTable[sourceId].videoSpeakerVolume = Player.PlayerData.metadata['FranticYoutube'].SpeakerVolume
-        vidSourceTable[sourceId].videoSpeakerPosition = GetEntityCoords(GetPlayerPed(vidSourceTable[sourceId].source))
-        cb(lastVideoData[src])
-    end)
-end)
-
-QBCore.Functions.CreateCallback('Frantic_Youtube:server:AddVideoToPlaylist', function(source, cb, data)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    local time = 0
-    local citizenId = Player.PlayerData.citizenid
-    local emptyPlaylistTable = {
-        ['name'] = data.playlistActive.name,
-        ['videos'] = '',
+    local emitter = {
+        videoId = videoId,
+        title = metadata.title,
+        author = metadata.author,
+        duration = metadata.duration,
+        state = statePlaying,
+        speakerVolume = GetYoutubeMetadata(Player).SpeakerVolume,
+        loaded = false,
+        awaitingStart = true,
     }
+    SetEmitterPosition(emitter, 0.0)
+    emitters[src] = emitter
+    BroadcastEmitter(src)
 
-    -- Now we don't store the video data in the database. We just store the video id in the citizen's data
+    local video = BuildVideoEntry(videoId, metadata)
+    local citizenData = GetCitizenData(src)
+    if citizenData then
+        AddToHistory(citizenData, video)
+    end
 
-    MySQL.Async.fetchAll("SELECT * FROM frantic_youtube_citizens WHERE citizenid = @citizenid", {
-        ["@citizenid"] = citizenId
-    }, function (citizenResult)
-        if citizenResult[1] == nil then
-            MySQL.insert('INSERT INTO frantic_youtube_citizens (citizenid, playlists, videos) VALUES (?, ?, ?)', {
-                citizenId,
-                "",
-                "",
-            })
-        end
-
-        lastVideoData[src] = "empty"
-        TriggerClientEvent('Frantic_Youtube:client:GetVideoDataFromID', src, data.url)
-
-        while lastVideoData[src] == "empty" do
-            Wait(100)
-            time = time + 100
-
-            if time > 5000 then -- 5 seconds, took to long. Error
-                cb("timeout")
-                break -- Not really needed lmao
-            end
-        end
-
-        local videoTable = {
-            ["url"] = lastVideoData[src]["url"],
-            ["title"] = lastVideoData[src]["title"],
-            ["author"] = lastVideoData[src]["author"],
-            ["duration"] = lastVideoData[src]["duration"],
-        }
-
-        local playlists = json.decode(citizenResult[1].playlists)
-        if playlists == nil then
-            playlists = {[0] = emptyPlaylistTable}
-        else
-            -- Check if video url already exists
-            for k, v in pairs(playlists) do
-                if v.id == data.playlistActive.id then
-                    if v.videos == nil or v.videos == '' then
-                        v.videos = {[0] = videoTable}
-                        break
-                    else
-                        for k2, v2 in pairs(v.videos) do
-                            if v2.url == videoTable.url then
-                                cb(lastVideoData[src])
-                                return
-                            end
-                        end
-                    end
-                    v.videos[getTablelength(v.videos)] = videoTable
-                    break
-                end
-            end
-        end
-
-        MySQL.Async.execute('UPDATE frantic_youtube_citizens SET playlists = @playlists WHERE citizenid = @citizenid', {
-            ["@citizenid"] = citizenId,
-            ["@playlists"] = json.encode(playlists)
-        })
-    end)
-    cb(lastVideoData[src])
+    cb(video)
 end)
 
--- This is a callback function to get the video data for a citizen
+-- Returns title/author/duration for a video id or URL without playing it. Duration is 0 if no one has played it yet.
 QBCore.Functions.CreateCallback('Frantic_Youtube:server:GetVideoData', function(source, cb, data)
-    local src = source
-    local time = 0
-    lastVideoData[src] = "empty"
-
-    TriggerClientEvent('Frantic_Youtube:client:GetVideoDataFromURL', src, data)
-
-    while lastVideoData[src] == "empty" do
-        Wait(100)
-        time = time + 100
-
-        if time > 5000 then -- 5 seconds, took to long. Error
-            cb("timeout")
-            break -- Not really needed lmao
-        end
+    local videoId = ExtractVideoId(data)
+    if not videoId then
+        cb(false)
+        return
     end
 
-    cb(lastVideoData[src])
-end)
-
--- For internal use, to update the video data for a citizen
--- I suggest not to use this event from outside
-RegisterNetEvent('Frantic_Youtube:server:UpdateVideoDataForSource', function(data)
-    local src = source
-
-    lastVideoData[src] = data
-end)
-
-function FranticYoutube_Server_GetDataOnlySourceID(source, data)
-    local index = 0 -- This index is not networked. It is only used to keep track of the video data for the citizen
-    local vidSourceID = source .. '_' .. index
-    --if vidSourceTable[vidSourceID] then
-        -- For now we only use one video source per citizen
-        --
-        --while vidSourceTable[vidSourceID] do
-        --    index = index + 1
-        --    vidSourceID = tostring(source) .. '_' .. index
-        --end
-        --print('Source ID already exists')
-    --else
-    --vidSourceTable[source][index] = {
-
-    if not (vidSourceTable[vidSourceID]) then
-        vidSourceTable[vidSourceID] = {
-            source = source,
-            index = index,
-            videoUrl = "", --data.url,
-            videoStartTime = 0,
-            videoCurrentTime = 0, --data.time,
-            videoDuration = 0, -- data.duration,
-            videoState = 1, --data.state,
-            videoVolume = 1, --data.volume,
-            videoLoaded = false,
-            videoSpeakerVolume = 0,
-            videoSpeakerPosition = vector3(1000,1000,1000)
-        }
-    end
-
-    return vidSourceID
-end
-
-function FranticYoutube_Server_GetSourceID(source, data)
-    local index = 1
-    local vidSourceID = source .. '_' .. index
-    if vidSourceTable[vidSourceID] then
-        -- For now we only use one video source per citizen
-        --
-        --while vidSourceTable[vidSourceID] do
-        --    index = index + 1
-        --    vidSourceID = tostring(source) .. '_' .. index
-        --end
-        --print('Source ID already exists')
-    else
-    --vidSourceTable[source][index] = {
-        vidSourceTable[vidSourceID] = {
-            source = source,
-            index = index,
-            videoUrl = data.url,
-            videoStartTime = 0,
-            videoCurrentTime = 0, --data.time,
-            videoDuration = 0, -- data.duration,
-            videoState = 1, --data.state,
-            videoVolume = 1, --data.volume,
-            videoLoaded = false,
-            videoSpeakerVolume = 1,
-            videoSpeakerPosition = vector3(1000,1000,1000)
-        }
-    end
-    return vidSourceID
-end
-
-QBCore.Functions.CreateCallback('Frantic_Youtube:server:GetDataOnlySourceID', function(source, cb, data)
-    cb(FranticYoutube_Server_GetDataOnlySourceID(source, data))
-end)
-
-QBCore.Functions.CreateCallback('Frantic_Youtube:server:GetSourceID', function(source, cb, data)
-    cb(FranticYoutube_Server_GetSourceID(source, data))
-end)
-
-
-QBCore.Functions.CreateCallback('Frantic_Youtube:server:GetCitizenVideos', function(source, cb, data)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    local citizenId = Player.PlayerData.citizenid
-    local waitTime = 0
-
-    MySQL.Async.fetchAll("SELECT * FROM frantic_youtube_citizens WHERE citizenid = @citizenid", {
-        ["@citizenid"] = citizenId
-    }, function (result)
-        if result[1] == nil then
-            cb("empty")
-        else
-            local videos = result[1].videos
-            if videos == nil then
-                cb("empty")
-            else
-                cb(json.decode(videos))
-            end
-        end
-    end)
-end)
-
-
-QBCore.Functions.CreateCallback('Frantic_Youtube:server:GetCitizenPlaylists', function(source, cb, data)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    local citizenId = Player.PlayerData.citizenid
-    local waitTime = 0
-
-    MySQL.Async.fetchAll("SELECT * FROM frantic_youtube_citizens WHERE citizenid = @citizenid", {
-        ["@citizenid"] = citizenId
-    }, function (result)
-        if result[1] == nil then
-            cb("empty")
-        else
-            local playlists = result[1].playlists
-            if playlists == nil then
-                cb("empty")
-            else
-                cb(json.decode(playlists))
-            end
-        end
-    end)  
-end)
-
-
-QBCore.Functions.CreateCallback('Frantic_Youtube:server:CreateNewPlaylist', function(source, cb, data)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    local citizenId = Player.PlayerData.citizenid
-    local emptyPlaylistTable = {
-        ['name'] = data.name,
-        ['videos'] = data.videos,
-        ['id'] = 0,
-    }
-    -- Now, we don't use the playlists table. We just store the playlist in the citizen's data
-    MySQL.Async.fetchAll("SELECT * FROM frantic_youtube_citizens WHERE citizenid = @citizenid", {
-        ["@citizenid"] = citizenId
-    }, function (citizenResult)
-        if citizenResult[1] == nil then
-            MySQL.insert('INSERT INTO frantic_youtube_citizens (citizenid, playlists, videos) VALUES (?, ?, ?)', {
-                citizenId,
-                {[0] = emptyPlaylistTable},
-                '',
-            })
-        else
-            local playlists = json.decode(citizenResult[1].playlists)
-            if playlists == nil then
-                playlists = {[0] = emptyPlaylistTable}
-            else
-                emptyPlaylistTable['id'] = getTablelength(playlists)
-                playlists[getTablelength(playlists)] = emptyPlaylistTable
-            end
-            MySQL.Async.execute('UPDATE frantic_youtube_citizens SET playlists = @playlists WHERE citizenid = @citizenid', {
-                ["@citizenid"] = citizenId,
-                ["@playlists"] = json.encode(playlists),
-            })
-        end
-    end)
+    local metadata = FetchVideoMetadata(videoId)
+    cb(metadata and BuildVideoEntry(videoId, metadata) or false)
 end)
 
 RegisterNetEvent('Frantic_Youtube:server:SetVideoPlayingStatus', function(data)
     local src = source
-    local sourceId = FranticYoutube_Server_GetSourceID(src, {url = ""})
+    local emitter = emitters[src]
+    local state = type(data) == 'table' and tonumber(data.state)
+    if not emitter or (state ~= stateStopped and state ~= statePlaying and state ~= statePaused) or state == emitter.state then
+        return
+    end
 
-    vidSourceTable[sourceId].videoState = data.state
+    local position = GetEmitterPosition(emitter)
+    if state == statePlaying and emitter.state == stateStopped then
+        -- Pressing play on a finished video starts it over.
+        position = 0.0
+    end
+
+    emitter.state = state
+    SetEmitterPosition(emitter, position)
+    BroadcastEmitter(src)
 end)
 
 RegisterNetEvent('Frantic_Youtube:server:SetVideoTime', function(data)
     local src = source
-    local sourceId = FranticYoutube_Server_GetSourceID(src, {url = ""})
-
-    vidSourceTable[sourceId].videoCurrentTime = tonumber(data.time)
-end)
-
-RegisterNetEvent('Frantic_Youtube:server:SetVideoLoadedForSource', function(data)
-    local src = source
-    --local sourceId = FranticYoutube_Server_GetSourceID(src, {url = "dQw4w9WgXcQ"}) -- Never gonna give you up
-    if (string.match(data.vidSrcID, "([^_]+)")) then -- Source is the owner
-        vidSourceTable[data.vidSrcID].videoLoaded = data.vidLoaded
-        if data.vidLoaded then
-            vidSourceTable[data.vidSrcID].videoCurrentTime = 0 -- Start video when it's loaded
-        end
-        --TriggerClientEvent('Frantic_Youtube:client:SetVideoLoadedForSource', src, data.vidSrcID, data.vidLoaded)
+    local emitter = emitters[src]
+    if not emitter or type(data) ~= 'table' then
+        return
     end
+
+    local maxPosition = emitter.duration > 0 and emitter.duration or Config.maxVideoDuration
+    local position = ToClampedNumber(data.time, 0.0, maxPosition)
+    if not position then
+        return
+    end
+
+    if emitter.state == stateStopped and position < maxPosition then
+        emitter.state = statePlaying
+    end
+
+    emitter.awaitingStart = false
+    SetEmitterPosition(emitter, position)
+    BroadcastEmitter(src)
 end)
+
+-- Sent by the owner's own player once the video actually starts.
+-- Restarts the timeline at 0 so the owner doesn't miss the opening seconds spent buffering, and fills in the duration oEmbed can't provide.
+RegisterNetEvent('Frantic_Youtube:server:ReportVideoReady', function(data)
+    local src = source
+    local emitter = emitters[src]
+    if not emitter or type(data) ~= 'table' or data.videoId ~= emitter.videoId or emitter.loaded then
+        return
+    end
+
+    emitter.loaded = true
+
+    local duration = ToClampedNumber(data.duration, 0.0, Config.maxVideoDuration)
+    if duration and duration > 0 and emitter.duration <= 0 then
+        emitter.duration = duration
+
+        local metadata = metadataCache[emitter.videoId]
+        if metadata then
+            metadata.duration = duration
+        end
+
+        local citizenData = citizenCache[src]
+        if citizenData and not citizenData.loading then
+            UpdateStoredDuration(citizenData, emitter.videoId, duration)
+        end
+    end
+
+    if emitter.awaitingStart then
+        emitter.awaitingStart = false
+        SetEmitterPosition(emitter, 0.0)
+    end
+
+    BroadcastEmitter(src)
+end)
+
+-- Sent by the owner's own player when YouTube refuses the video (removed, private, embedding disabled...).
+RegisterNetEvent('Frantic_Youtube:server:ReportVideoError', function(data)
+    local src = source
+    local emitter = emitters[src]
+    if not emitter or type(data) ~= 'table' or data.videoId ~= emitter.videoId then
+        return
+    end
+
+    emitter.state = stateStopped
+    SetEmitterPosition(emitter, 0.0)
+    BroadcastEmitter(src)
+    TriggerClientEvent('QBCore:Notify', src, 'This video can\'t be played', 'error')
+end)
+
+-- Full snapshot for a client that just loaded in; afterwards it only receives changes.
+RegisterNetEvent('Frantic_Youtube:server:RequestEmitters', function()
+    local src = source
+    local payload = {}
+    for owner, emitter in pairs(emitters) do
+        payload[tostring(owner)] = BuildEmitterPayload(emitter)
+    end
+    TriggerClientEvent('Frantic_Youtube:client:SetEmitters', src, payload)
+end)
+
+-- ========================
+-- Volume Events
+-- ========================
 
 RegisterNetEvent('Frantic_Youtube:server:SetCitizenSpeakerVolume', function(data)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
-    local citizenId = Player.PlayerData.citizenid
-
-    Player.PlayerData.metadata['FranticYoutube'].SpeakerVolume = data.speakerVolume
-    Player.Functions.SetMetaData('FranticYoutube', Player.PlayerData.metadata['FranticYoutube'])
-
-    if vidSourceTable[src .. "_1"] then
-        vidSourceTable[src .. "_1"].videoSpeakerVolume = data.speakerVolume
+    local speakerVolume = type(data) == 'table' and ToClampedNumber(data.speakerVolume, 0.0, 1.0)
+    if not Player or not speakerVolume then
+        return
     end
 
-    --MySQL.Async.execute('UPDATE frantic_youtube_citizens SET speakerVolume = @speakerVolume WHERE citizenid = @citizenid', {
-    --    ["@citizenid"] = citizenId,
-    --    ["@speakerVolume"] = data.speakerVolume
-    --})
+    local metadata = GetYoutubeMetadata(Player)
+    metadata.SpeakerVolume = speakerVolume
+    Player.Functions.SetMetaData('FranticYoutube', metadata)
+
+    local emitter = emitters[src]
+    if emitter and emitter.speakerVolume ~= speakerVolume then
+        emitter.speakerVolume = speakerVolume
+        BroadcastEmitter(src)
+    end
 end)
 
 RegisterNetEvent('Frantic_Youtube:server:SetCitizenListenerVolume', function(data)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
-    local citizenId = Player.PlayerData.citizenid
+    local listenerVolume = type(data) == 'table' and ToClampedNumber(data.listenerVolume, 0.0, 1.0)
+    if not Player or not listenerVolume then
+        return
+    end
 
-    Player.PlayerData.metadata['FranticYoutube'].ListenerVolume = data.listenerVolume
-    Player.Functions.SetMetaData('FranticYoutube', Player.PlayerData.metadata['FranticYoutube'])
-
-    --MySQL.Async.execute('UPDATE frantic_youtube_citizens SET listenerVolume = @listenerVolume WHERE citizenid = @citizenid', {
-    --    ["@citizenid"] = citizenId,
-    --    ["@listenerVolume"] = data.listenerVolume
-    --})
+    local metadata = GetYoutubeMetadata(Player)
+    metadata.ListenerVolume = listenerVolume
+    Player.Functions.SetMetaData('FranticYoutube', metadata)
 end)
 
+-- ========================
+-- Library Callbacks
+-- ========================
 
-function NullifySourceID(sourceID)
-    if vidSourceTable[sourceID] then
-        vidSourceTable[sourceId] = nil
+QBCore.Functions.CreateCallback('Frantic_Youtube:server:GetCitizenVideos', function(source, cb)
+    local citizenData = GetCitizenData(source)
+    cb(citizenData and citizenData.videos or {})
+end)
+
+QBCore.Functions.CreateCallback('Frantic_Youtube:server:GetCitizenPlaylists', function(source, cb)
+    local citizenData = GetCitizenData(source)
+    cb(citizenData and citizenData.playlists or {})
+end)
+
+QBCore.Functions.CreateCallback('Frantic_Youtube:server:CreateNewPlaylist', function(source, cb, data)
+    local citizenData = GetCitizenData(source)
+    local name = type(data) == 'table' and type(data.name) == 'string' and data.name:match('^%s*(.-)%s*$') or ''
+    if not citizenData or name == '' or #citizenData.playlists >= Config.maxPlaylists then
+        cb(false)
+        return
     end
+
+    local nextId = 1
+    for _, playlist in ipairs(citizenData.playlists) do
+        nextId = math.max(nextId, playlist.id + 1)
+    end
+
+    citizenData.playlists[#citizenData.playlists + 1] = {
+        id = nextId,
+        name = name:sub(1, Config.maxPlaylistNameLength),
+        videos = {},
+    }
+    SavePlaylists(citizenData)
+    cb(citizenData.playlists)
+end)
+
+QBCore.Functions.CreateCallback('Frantic_Youtube:server:AddVideoToPlaylist', function(source, cb, data)
+    local src = source
+    if type(data) ~= 'table' or type(data.playlistActive) ~= 'table' then
+        cb(false)
+        return
+    end
+
+    local videoId = ExtractVideoId(data.url)
+    local playlistId = tonumber(data.playlistActive.id)
+    if not videoId or not playlistId then
+        cb(false)
+        return
+    end
+
+    local metadata = FetchVideoMetadata(videoId)
+    local citizenData = metadata and GetCitizenData(src)
+    if not citizenData then
+        cb(false)
+        return
+    end
+
+    for _, playlist in ipairs(citizenData.playlists) do
+        if playlist.id == playlistId then
+            local video = BuildVideoEntry(videoId, metadata)
+            if not FindVideoIndex(playlist.videos, videoId) then
+                if #playlist.videos >= Config.maxPlaylistSize then
+                    cb(false)
+                    return
+                end
+                playlist.videos[#playlist.videos + 1] = video
+                SavePlaylists(citizenData)
+            end
+            cb(video)
+            return
+        end
+    end
+
+    cb(false)
+end)
+
+-- ========================
+-- Cleanup
+-- ========================
+
+local function ForgetPlayer(src)
+    RemoveEmitter(src)
+    citizenCache[src] = nil
+    lastPlayRequest[src] = nil
 end
 
-AddEventHandler('playerDropped', function(reason)
-    local src = source
+AddEventHandler('playerDropped', function()
+    ForgetPlayer(source)
+end)
 
-    NullifySourceID(src .. "_0")
-    NullifySourceID(src .. "_1")
+-- Character switch: the speaker and cached library belong to the character being logged out.
+-- AddEventHandler, not RegisterNetEvent: qb-core raises this locally, and a client must not be able to pass someone else's id here.
+AddEventHandler('QBCore:Server:OnPlayerUnload', function(src)
+    if src then
+        ForgetPlayer(src)
+    end
 end)

@@ -15,10 +15,12 @@ Feel free to create issues and pull requests. If you fix a bug, don't keep it on
 ## General Information
 Videos are networked, attached to players and listenable by everyone in a certain radius.  
 Radius is in the config.lua  
-  
-Default settings:  
-Server updates clients every second.  
-Client updates videos every 10th of a second.  
+
+How it stays light:  
+- The server only keeps a speaker for a player while they have a video, and only sends clients a message when something changes (play, pause, seek, volume, end). There is no per-second broadcast.  
+- Playback position is sent as "position at the moment of sending"; every client extrapolates it with its own clock.  
+- Each client keeps a small pool of YouTube players (`Config.maxActivePlayers`, 3 by default) and gives them to the nearest speakers. Everything else is not loaded at all, so 64 players on the server still means at most 3 YouTube iframes per client, and none when no one is playing music nearby. Unused players are destroyed after `Config.idlePlayerLifetime` seconds.  
+- Video titles and authors come from YouTube's oEmbed endpoint on the server. The duration is reported by the owner's own player once it starts.  
 
 ## Dependencies
 This library depends on:  
@@ -62,6 +64,10 @@ FranticYoutube = {
 ```
 8. Finally, run the SQL file for your database.
 
+### Upgrading an existing database
+Run the commented migration at the bottom of `frantic_youtube.sql` once. It widens the JSON columns and makes `citizenid` unique.  
+Old lists stored with a `[0]` first index are converted to plain arrays automatically the next time each citizen's data is saved.
+
 ## Usage - Callbacks and Events
 1. <b>Server Callback</b> - Add new video to a playlist:  
 	`'Frantic_Youtube:server:AddVideoToPlaylist'`
@@ -71,13 +77,13 @@ FranticYoutube = {
 	<b>Example arguments to Pass:</b>
 	```lua
 	data = {
-		url = 'dQw4w9WgXcQ', 	-- YouTube Video ID
+		url = 'dQw4w9WgXcQ', 	-- YouTube Video ID or URL
 		playlistActive = {
-			id = 0, 			-- Target Playlist ID
+			id = 1, 			-- Target Playlist ID
 		},		
 	}
 	```
-	<b>Returns:</b> Video data of the newly added track.
+	<b>Returns:</b> Video data of the added track, or `false` if the video or playlist doesn't exist or the playlist is full.
 2. <b>Server Event</b> - Set Video Playing Status:  
 	`'Frantic_Youtube:server:SetVideoPlayingStatus'` 
 
@@ -144,10 +150,10 @@ FranticYoutube = {
 	```lua
 	data = {
 		name = 'New Playlist',  -- Name of the playlist that will be created.
-		videos = '', -- Initial video data. I suggest leaving it empty and using AddVideoToPlaylist afterwards.
 	}
 	```
-	<b>Returns:</b> Nothing. (TODO: Should return new playlist ID)
+	New playlists start empty; use AddVideoToPlaylist afterwards.  
+	<b>Returns:</b> The client's updated list of playlists (the new one is last), or `false` if the name is empty or `Config.maxPlaylists` is reached.
 
 7. <b>Server Callback</b> - Play Video with ID:  
 	`'Frantic_Youtube:server:PlayVideoWithID'` 
@@ -156,11 +162,9 @@ FranticYoutube = {
 
 	<b>Example arguments to Pass:</b>
 	```lua
-	data = {
-		url = 'dQw4w9WgXcQ',  -- YouTube ID of the video to play
-	}
+	data = 'dQw4w9WgXcQ' -- YouTube ID or URL of the video to play. A table with a url field also works.
 	```
-	<b>Returns:</b> Video Data OR "timeout"
+	<b>Returns:</b> Video data (`url`, `title`, `author`, `duration`) or `false` if the video can't be embedded, doesn't exist, or the request came within `Config.playCooldown`.
 
 8. <b>Server Callback</b> - Get Citizen Videos:  
 	`'Frantic_Youtube:server:GetCitizenVideos'` 
@@ -184,29 +188,41 @@ FranticYoutube = {
 	```
 	<b>Returns:</b> A list of client's playlists.
 
-9. <b>Client Event Handler</b> - Update Video Data (For your Resource):  
-	`'Frantic_Youtube:client:UpdateVideoDataResource'` 
+10. <b>Server Callback</b> - Get Video Data:  
+	`'Frantic_Youtube:server:GetVideoData'` 
 
-	You can use this with AddEventHandler to do stuff with updated song data.
+	Looks up a video without playing it.
 
-	This is called every time after server updates the song data for clients.
-
-	<b>Example arguments that will be given in order:</b>
+	<b>Example arguments to Pass:</b>
 	```lua
-	sourceTable = { -- Table of sources with player IDs
-		"25_1" = { -- An example source with player ID of 25
-	            source = 25,		-- Owner Client ID
-	            index = 1,			-- For now, we use only 1
-	            videoUrl = 'dQw4w9WgXcQ',	-- Youtube ID of Current Video
-	            videoStartTime = 124,	-- Start Time (in Server Sync Time) 
-	            videoCurrentTime = 152,	-- Current Video Time
-	            videoDuration = 220,	-- Current Video Total Duration
-	            videoState = 1,		-- Current Video State
-	            videoVolume = 1,		-- Current Video Volume
-	            videoLoaded = false,	-- Is Video Finished Buffering?
-	            videoSpeakerVolume = 1,	-- Speaker Volume of the Owner Client
-		}
-	}, 
-	vidServerTime = 100 -- Server sync time
+	data = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' -- YouTube ID or URL
 	```
+	<b>Returns:</b> Video data (`duration` is 0 if no one has played it yet) or `false`.
+
+11. <b>Client Event Handler</b> - Own Video Updated (For your Resource):  
+	`'Frantic_Youtube:client:OwnVideoUpdated'` 
+
+	Raised locally on the client with the player's own speaker: on every change, and once a second while it exists. The argument is `nil` once the speaker is gone.  
+	Replaces the old `UpdateVideoDataResource` event, which sent every speaker on the server ten times a second.
+
+	<b>Example argument:</b>
+	```lua
+	videoData = {
+		videoUrl = 'dQw4w9WgXcQ',	-- YouTube ID of Current Video
+		title = 'Never Gonna Give You Up',
+		author = 'Rick Astley',
+		videoCurrentTime = 152,	-- Current Video Time (seconds)
+		videoDuration = 220,	-- Total Duration (seconds). 0 until the owner's player has loaded the video.
+		videoState = 1,		-- 1 = Playing, 2 = Paused, 0 = Ended/Stopped
+		videoLoaded = true,	-- Has the owner's player started the video?
+		videoSpeakerVolume = 1,	-- Speaker Volume of the Owner Client
+	}
+	```
+
+12. <b>Client Exports</b>  
+	`exports['Frantic_Youtube']:GetOwnVideoData()` returns the same table for the player's own speaker, or `nil`.  
+	`exports['Frantic_Youtube']:GetVideoData(serverId)` returns it for any player's speaker, or `nil`.
+
+13. <b>Command</b>  
+	`/playvideo <YouTube URL or ID>` plays a video on your own speaker.
 

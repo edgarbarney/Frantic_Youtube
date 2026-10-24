@@ -1,278 +1,284 @@
 QBCore = exports['qb-core']:GetCoreObject()
 
-function print_table(node)
-    local cache, stack, output = {},{},{}
-    local depth = 1
-    local output_str = "{\n"
+-- ========================
+-- State
+-- ========================
 
-    while true do
-        local size = 0
-        for k,v in pairs(node) do
-            size = size + 1
-        end
+local stateStopped = 0
 
-        local cur_index = 1
-        for k,v in pairs(node) do
-            if (cache[node] == nil) or (cur_index >= cache[node]) then
+-- Every speaker on the server, keyed by owner server id, as last sent by the server.
+-- receivedAt is this client's GetGameTimer() at arrival; positions are extrapolated from it.
+local emitters = {}
 
-                if (string.find(output_str,"}",output_str:len())) then
-                    output_str = output_str .. ",\n"
-                elseif not (string.find(output_str,"\n",output_str:len())) then
-                    output_str = output_str .. "\n"
-                end
+-- Speakers that currently hold a YouTube player in the NUI page, with the volume (0 - 100) last sent for each.
+local activeVolumes = {}
 
-                -- This is necessary for working with HUGE tables otherwise we run out of memory using concat on huge strings
-                table.insert(output,output_str)
-                output_str = ""
+local nuiReady = false
+local listenerVolume = Config.defaultListenerVolume
+local lastOwnNotify = 0
 
-                local key
-                if (type(k) == "number" or type(k) == "boolean") then
-                    key = "["..tostring(k).."]"
-                else
-                    key = "['"..tostring(k).."']"
-                end
+-- ========================
+-- Helpers
+-- ========================
 
-                if (type(v) == "number" or type(v) == "boolean") then
-                    output_str = output_str .. string.rep('\t',depth) .. key .. " = "..tostring(v)
-                elseif (type(v) == "table") then
-                    output_str = output_str .. string.rep('\t',depth) .. key .. " = {\n"
-                    table.insert(stack,node)
-                    table.insert(stack,v)
-                    cache[node] = cur_index+1
-                    break
-                else
-                    output_str = output_str .. string.rep('\t',depth) .. key .. " = '"..tostring(v).."'"
-                end
-
-                if (cur_index == size) then
-                    output_str = output_str .. "\n" .. string.rep('\t',depth-1) .. "}"
-                else
-                    output_str = output_str .. ","
-                end
-            else
-                -- close the table
-                if (cur_index == size) then
-                    output_str = output_str .. "\n" .. string.rep('\t',depth-1) .. "}"
-                end
-            end
-
-            cur_index = cur_index + 1
-        end
-
-        if (size == 0) then
-            output_str = output_str .. "\n" .. string.rep('\t',depth-1) .. "}"
-        end
-
-        if (#stack > 0) then
-            node = stack[#stack]
-            stack[#stack] = nil
-            depth = cache[node] == nil and depth + 1 or depth - 1
-        else
-            break
-        end
-    end
-
-    -- This is necessary for working with HUGE tables otherwise we run out of memory using concat on huge strings
-    table.insert(output,output_str)
-    output_str = table.concat(output)
-
-    print(output_str)
+local function RefreshListenerVolume(playerData)
+    local metadata = playerData and playerData.metadata and playerData.metadata['FranticYoutube']
+    local volume = metadata and tonumber(metadata.ListenerVolume)
+    listenerVolume = volume and math.max(0.0, math.min(1.0, volume)) or Config.defaultListenerVolume
 end
 
-function extractYouTubeVideoID(url)
-    local possibleMatches = {
-        '[?&]v=([a-zA-Z0-9_-]+)', -- Normal
-        'youtu.be/([a-zA-Z0-9_-]+)', -- Shortened
-        'embed/([a-zA-Z0-9_-]+)', -- Embed
-        'shorts/([a-zA-Z0-9_-]+)', -- Shorts
+local function GetOwnServerId()
+    return GetPlayerServerId(PlayerId())
+end
+
+local function GetEmitterPosition(emitter)
+    local position = emitter.position
+    if emitter.state == 1 then
+        position = position + (GetGameTimer() - emitter.receivedAt) / 1000.0
+    end
+    if emitter.duration > 0 then
+        position = math.min(position, emitter.duration)
+    end
+    return position
+end
+
+-- Field names kept from the old broadcast table, so resources written against it (the phone) read the same keys.
+local function BuildPublicVideoData(emitter)
+    return {
+        videoUrl = emitter.videoId,
+        title = emitter.title,
+        author = emitter.author,
+        videoDuration = emitter.duration,
+        videoCurrentTime = GetEmitterPosition(emitter),
+        videoState = emitter.state,
+        videoLoaded = emitter.loaded,
+        videoSpeakerVolume = emitter.speakerVolume,
     }
-
-    local match = nil
-
-    for _, pattern in ipairs(possibleMatches) do
-        match = string.match(url, pattern)
-        if match then
-            return match
-        end
-    end
 end
 
-RegisterCommand('playvideo', function(source, args)
-    if not args[1] then
-        QBCore.Functions.Notify('You need to input a Video ID', 'error')
-    else
-        TriggerEvent('Frantic_Youtube:client:PlayVideoWithURL', args[1])
-    end
-end, false)
+local function NotifyOwnVideo()
+    lastOwnNotify = GetGameTimer()
+    local emitter = emitters[GetOwnServerId()]
+    TriggerEvent('Frantic_Youtube:client:OwnVideoUpdated', emitter and BuildPublicVideoData(emitter) or nil)
+end
 
--- Clientside callable events. This will only affect the client. Not networked.
-RegisterNetEvent('Frantic_Youtube:client:PlayVideoWithData', function(videoData)
-    QBCore.Functions.TriggerCallback('Frantic_Youtube:server:GetSourceID', function(vidSourceID)
-        SendNUIMessage({
-            action = 'PlayVideoWithID',
-            videoID = videoData["url"],
-            vidSourceID = vidSourceID,
-        })
-    end, videoData)
-end)
+-- NUI messages are JSON, so ids go over as strings; numeric keys would turn the table into a sparse array.
+local function BuildNuiEmitter(emitter)
+    return {
+        videoId = emitter.videoId,
+        state = emitter.state,
+        position = GetEmitterPosition(emitter),
+        duration = emitter.duration,
+    }
+end
 
---[[
-RegisterNetEvent('Frantic_Youtube:client:PlayVideoWithURL', function(videoURL)
-    QBCore.Functions.TriggerCallback('Frantic_Youtube:server:GetSourceID', function(vidSourceID)
-        SendNUIMessage({
-            action = 'PlayVideoWithID',
-            videoID = extractYouTubeVideoID(videoURL),
-            vidSourceID = vidSourceID,
-        })
-    end, videoURL)
-end)
-
-RegisterNetEvent('Frantic_Youtube:client:PlayVideoWithID', function(videoID)
-    QBCore.Functions.TriggerCallback('Frantic_Youtube:server:GetSourceID', function(vidSourceID)
-        SendNUIMessage({
-            action = 'PlayVideoWithID',
-            videoID = videoID,
-            vidSourceID = vidSourceID,
-        })
-    end, videoID)
-end)
-]]--
-
--- Clientside callable events end.
-
-local sourcePlayer = 0
-local sourcePlayerPed = 0
-local sourcePlayerCoords = vector3(0,0,0)
-local sourcePlayerDistance = 0
-local sendCurrentData = false
-local lastSourceTable = nil
-
--- This is omittable.
--- Mainly for smoothness of the attenuation of the sound.
-CreateThread(function()
-    while true do
-        Wait(Config.clientRefreshRate)
-        RefreshPlayers()
-    end
-end)
-
---[[
-CreateThread(function()
-    -- Do Once
-    local Player = QBCore.Functions.GetPlayerData()
-end)
-]]--
-
-local RefreshPlayerMetadata = nil
-
-function RefreshPlayers()
-    if not lastSourceTable then
+local function SendEmitterToNui(serverId)
+    if not nuiReady then
         return
     end
 
-    RefreshPlayerMetadata = QBCore.Functions.GetPlayerData().metadata
+    local emitter = emitters[serverId]
+    SendNUIMessage({
+        action = 'SetEmitter',
+        id = tostring(serverId),
+        emitter = emitter and BuildNuiEmitter(emitter) or false,
+    })
+end
 
-    if (RefreshPlayerMetadata == nil) then
-        RefreshPlayerMetadata = { ListenerVolume = 0.5 }
-    else
-        RefreshPlayerMetadata = RefreshPlayerMetadata['FranticYoutube']
+local function SendAllEmittersToNui()
+    if not nuiReady then
+        return
     end
 
-    for vidSourceID, videoData in pairs(lastSourceTable) do
-        sendCurrentData = false
-        --if (string.sub(vidSourceID, -1) == '0') then
-        if (videoData.index == 0) then
-            -- This source is data only, we don't need to play it
-        else
+    local payload = {}
+    for serverId, emitter in pairs(emitters) do
+        payload[tostring(serverId)] = BuildNuiEmitter(emitter)
+    end
+    SendNUIMessage({ action = 'SetEmitters', emitters = payload })
+end
 
-            -- Get entity coords from source id (sourceid is the owner player's server id)
-            -- We'll get distance between current client and the source player
-            sourcePlayer = GetPlayerFromServerId(videoData.source)
-            sourcePlayerPed = GetPlayerPed(sourcePlayer)
-            sourcePlayerCoords = GetEntityCoords(sourcePlayerPed)
-            sourcePlayerDistance = #(GetEntityCoords(PlayerPedId()) - sourcePlayerCoords)
+-- ========================
+-- Speaker Selection
+-- ========================
 
-            -- Source player is ocludded, fallback to server distance
-            if (sourcePlayerDistance == 0.0) then
-                sourcePlayerDistance = #(GetEntityCoords(PlayerPedId()) - videoData.videoSpeakerPosition)
-            end
+-- Picks which speakers get one of the few YouTube players and at what volume.
+-- Out-of-scope players (GetPlayerFromServerId == -1) are hundreds of metres away, far outside maxDistance, so they are simply skipped; the server no longer needs to send positions.
+local function UpdateActiveEmitters()
+    local ownServerId = GetOwnServerId()
+    local ownCoords = GetEntityCoords(PlayerPedId())
+    local candidates = {}
 
-            if (videoData.videoSpeakerVolume == nil) then
-                videoData.videoSpeakerVolume = 1.0
-            end
-
-            if (sourcePlayerDistance < 0.2 or GetPlayerServerId(PlayerId()) == videoData.source) then
-                -- Too close to player, can be player's own source
-                -- Play at full volume
-                
-                videoData.videoVolume = 100.0 * videoData.videoSpeakerVolume * RefreshPlayerMetadata.ListenerVolume
-                
-                sendCurrentData = true
-            elseif (sourcePlayerDistance < Config.voiceModes[3][1]) then
-                videoData.videoVolume = 1 - (sourcePlayerDistance / Config.voiceModes[3][1])
-                videoData.videoVolume = (videoData.videoVolume * 100.0) * videoData.videoSpeakerVolume * RefreshPlayerMetadata.ListenerVolume
-
-                sendCurrentData = true
+    for serverId, emitter in pairs(emitters) do
+        if emitter.state ~= stateStopped then
+            local distance = nil
+            if serverId == ownServerId then
+                distance = 0.0
             else
-                -- Too far from player, don't play
-                videoData.videoVolume = 0.0
-                sendCurrentData = true
+                local player = GetPlayerFromServerId(serverId)
+                if player ~= -1 then
+                    distance = #(ownCoords - GetEntityCoords(GetPlayerPed(player)))
+                end
             end
 
-            if sendCurrentData then
-                SendNUIMessage({
-                    action = 'UpdateVideoData',
-                    videoData = videoData,
-                    videoSourceID = vidSourceID,
-                })
+            -- A speaker already holding a player keeps it out to releaseDistance (silent past maxDistance), so the edge doesn't flicker.
+            local limit = activeVolumes[serverId] and Config.releaseDistance or Config.maxDistance
+            if distance and distance < limit then
+                local attenuation = math.max(0.0, 1.0 - distance / Config.maxDistance)
+                candidates[#candidates + 1] = {
+                    serverId = serverId,
+                    distance = distance,
+                    volume = math.floor(100.0 * attenuation * emitter.speakerVolume * listenerVolume + 0.5),
+                }
             end
         end
     end
 
-    TriggerEvent('Frantic_Youtube:client:UpdateVideoDataResource', lastSourceTable, vidServerTime)
+    table.sort(candidates, function(a, b)
+        return a.distance < b.distance
+    end)
+
+    local newVolumes = {}
+    local changed = false
+    for i = 1, math.min(#candidates, Config.maxActivePlayers) do
+        local candidate = candidates[i]
+        newVolumes[candidate.serverId] = candidate.volume
+        if activeVolumes[candidate.serverId] ~= candidate.volume then
+            changed = true
+        end
+    end
+    for serverId in pairs(activeVolumes) do
+        if newVolumes[serverId] == nil then
+            changed = true
+        end
+    end
+
+    activeVolumes = newVolumes
+
+    if changed and nuiReady then
+        local payload = {}
+        for serverId, volume in pairs(newVolumes) do
+            payload[tostring(serverId)] = volume
+        end
+        SendNUIMessage({ action = 'SetActive', volumes = payload })
+    end
 end
 
--- This is for other resources to use the video data
--- Add your own event handler to get the video data
-RegisterNetEvent('Frantic_Youtube:client:UpdateVideoDataResource')
+CreateThread(function()
+    while true do
+        UpdateActiveEmitters()
 
-RegisterNetEvent('Frantic_Youtube:client:UpdateVideoData', function(vidSourceTable, vidServerTime)
-    if not vidSourceTable then
-        -- Video update error
-        lastSourceTable = nil
-    else
-        lastSourceTable = vidSourceTable
-        RefreshPlayers()
+        if emitters[GetOwnServerId()] and GetGameTimer() - lastOwnNotify >= 1000 then
+            NotifyOwnVideo()
+        end
+
+        Wait(next(emitters) and Config.clientRefreshRate or 1000)
     end
 end)
 
-RegisterNetEvent('Frantic_Youtube:client:GetVideoDataFromURL', function(videoURL)
-    QBCore.Functions.TriggerCallback('Frantic_Youtube:server:GetDataOnlySourceID', function(vidSourceID)
-        SendNUIMessage({
-            action = 'GetVideoDataFromID',
-            videoID = extractYouTubeVideoID(videoURL),
-            vidSourceID = vidSourceID,
-        })
-    end, videoURL)
+-- ========================
+-- Server Events
+-- ========================
+
+RegisterNetEvent('Frantic_Youtube:client:SetEmitter', function(serverId, emitter)
+    serverId = tonumber(serverId)
+    if not serverId then
+        return
+    end
+
+    if emitter then
+        emitter.receivedAt = GetGameTimer()
+    end
+    emitters[serverId] = emitter
+    SendEmitterToNui(serverId)
+
+    if serverId == GetOwnServerId() then
+        NotifyOwnVideo()
+    end
 end)
 
-RegisterNetEvent('Frantic_Youtube:client:GetVideoDataFromID', function(videoID)
-    QBCore.Functions.TriggerCallback('Frantic_Youtube:server:GetDataOnlySourceID', function(vidSourceID)
-        SendNUIMessage({
-            action = 'GetVideoDataFromID',
-            videoID = videoID,
-            vidSourceID = vidSourceID,
-        })
-    end, videoURL)
+RegisterNetEvent('Frantic_Youtube:client:SetEmitters', function(allEmitters)
+    local now = GetGameTimer()
+    emitters = {}
+    for serverId, emitter in pairs(allEmitters or {}) do
+        emitter.receivedAt = now
+        emitters[tonumber(serverId)] = emitter
+    end
+    SendAllEmittersToNui()
+    NotifyOwnVideo()
 end)
 
-RegisterNUICallback('ReceiveVideoData', function(data, cb)
-    TriggerServerEvent('Frantic_Youtube:server:UpdateVideoDataForSource', data)
+RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
+    RefreshListenerVolume(QBCore.Functions.GetPlayerData())
+end)
+
+RegisterNetEvent('QBCore:Player:SetPlayerData', function(playerData)
+    RefreshListenerVolume(playerData)
+end)
+
+CreateThread(function()
+    RefreshListenerVolume(QBCore.Functions.GetPlayerData())
+    TriggerServerEvent('Frantic_Youtube:server:RequestEmitters')
+end)
+
+-- ========================
+-- NUI Callbacks
+-- ========================
+
+RegisterNUICallback('NuiReady', function(_, cb)
+    nuiReady = true
+    SendNUIMessage({
+        action = 'Init',
+        maxActivePlayers = Config.maxActivePlayers,
+        driftTolerance = Config.driftTolerance,
+        idlePlayerLifetime = Config.idlePlayerLifetime,
+    })
+    SendAllEmittersToNui()
+
+    -- Forget what was sent before the page existed, so the next update sends the full active set.
+    activeVolumes = {}
     cb('ok')
 end)
 
-RegisterNUICallback('SetVideoLoaded', function(data, cb)
-    TriggerServerEvent('Frantic_Youtube:server:SetVideoLoadedForSource', data)
+-- The page reports for any speaker it plays; only the owner's report means anything to the server.
+RegisterNUICallback('VideoReady', function(data, cb)
+    if tonumber(data.id) == GetOwnServerId() then
+        TriggerServerEvent('Frantic_Youtube:server:ReportVideoReady', { videoId = data.videoId, duration = data.duration })
+    end
     cb('ok')
 end)
 
+RegisterNUICallback('VideoError', function(data, cb)
+    if tonumber(data.id) == GetOwnServerId() then
+        TriggerServerEvent('Frantic_Youtube:server:ReportVideoError', { videoId = data.videoId, code = data.code })
+    end
+    cb('ok')
+end)
+
+-- ========================
+-- Commands & Exports
+-- ========================
+
+RegisterCommand('playvideo', function(_, args)
+    if not args[1] then
+        QBCore.Functions.Notify('You need to input a video URL or ID', 'error')
+        return
+    end
+
+    QBCore.Functions.TriggerCallback('Frantic_Youtube:server:PlayVideoWithID', function(result)
+        if not result then
+            QBCore.Functions.Notify('Couldn\'t play that video', 'error')
+        end
+    end, args[1])
+end, false)
+
+-- Current state of this player's own speaker, or nil if it has none.
+exports('GetOwnVideoData', function()
+    local emitter = emitters[GetOwnServerId()]
+    return emitter and BuildPublicVideoData(emitter) or nil
+end)
+
+-- Current state of any player's speaker by server id, or nil if they have none.
+exports('GetVideoData', function(serverId)
+    local emitter = emitters[tonumber(serverId)]
+    return emitter and BuildPublicVideoData(emitter) or nil
+end)

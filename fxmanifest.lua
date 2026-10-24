@@ -8,23 +8,22 @@ author "FranticDreamer"
 
 ui_page 'html/index.html'
 
+shared_script {
+	"config.lua",
+}
+
 client_script {
 	"client/client.lua",
 }
-server_script {
-	"server/server.lua",
-	"@oxmysql/lib/MySQL.lua",
-}
 
-shared_script {
-	"config.lua",
+server_script {
+	"@oxmysql/lib/MySQL.lua",
+	"server/server.lua",
 }
 
 files {
 	'html/index.html',
 	'html/js/*.js',
-	'html/js/plugins/*.js',
-	'html/css/*.css',
 }
 
 dependencies {
